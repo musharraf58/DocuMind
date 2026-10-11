@@ -2,7 +2,7 @@
 
 RAG knowledge base API. FastAPI (async), PostgreSQL + pgvector, SQLAlchemy 2.0 async, Redis.
 
-**Status:** Phase 0 (scaffolding only: config, DB, migrations, `/health`, tests).
+**Status:** Phase 1 (users, JWT auth, per-user collections).
 
 ## Prerequisites
 
@@ -14,7 +14,7 @@ uv installs Python 3.12 for you if it's missing.
 ## Setup
 
 ```bash
-cp .env.example .env          # then set SECRET_KEY
+cp .env.example .env          # then set SECRET_KEY (32+ random chars, see comment inside)
 uv sync                       # create .venv and install deps (incl. dev)
 ```
 
@@ -37,6 +37,29 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 curl localhost:8000/health
 ```
+
+## Using the API
+
+Open http://localhost:8000/docs (Swagger UI).
+
+1. `POST /auth/register` with an email and a password of 8+ characters.
+2. Click **Authorize**, enter the email as `username` plus the password, and submit.
+   Swagger now sends your token on every request. Tokens expire after 30 minutes.
+3. Try `/auth/me` and the `/collections` endpoints.
+
+Or with curl:
+
+```bash
+curl -X POST localhost:8000/auth/register -H 'Content-Type: application/json' \
+  -d '{"email":"me@example.com","password":"correct-horse-battery"}'
+TOKEN=$(curl -s -X POST localhost:8000/auth/login \
+  -d 'username=me@example.com&password=correct-horse-battery' | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+curl -X POST localhost:8000/collections -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"name":"My docs"}'
+curl localhost:8000/collections -H "Authorization: Bearer $TOKEN"
+```
+
+A collection that belongs to someone else returns 404, the same as one that doesn't exist.
 
 ## Migrations
 
