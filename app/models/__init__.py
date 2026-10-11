@@ -1,3 +1,7 @@
 from app.models.base import Base
+from app.models.collection import Collection
+from app.models.user import User
 
-__all__ = ["Base"]
+# Importing every model here registers it on Base.metadata, which is what
+# Alembic autogenerate and the test suite's create_all() read.
+__all__ = ["Base", "Collection", "User"]
