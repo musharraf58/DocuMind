@@ -123,3 +123,15 @@ async def test_no_response_ever_contains_the_hash_or_password(client: AsyncClien
         assert "$argon2" not in response.text
         assert "hashed_password" not in response.text
         assert PASSWORD not in response.text
+
+
+async def test_non_bearer_scheme_is_401(client: AsyncClient) -> None:
+    response = await client.get("/auth/me", headers={"Authorization": "Basic YWxpY2U6cGFzcw=="})
+
+    assert response.status_code == 401
+
+
+async def test_openapi_advertises_plain_http_bearer(client: AsyncClient) -> None:
+    schemes = (await client.get("/openapi.json")).json()["components"]["securitySchemes"]
+
+    assert schemes == {"HTTPBearer": {"type": "http", "scheme": "bearer"}}

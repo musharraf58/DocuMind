@@ -1,27 +1,33 @@
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import decode_access_token
 from app.models import User
 
-# tokenUrl powers the "Authorize" button in Swagger. A missing Authorization
-# header makes this raise 401 automatically.
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+# HTTPBearer makes Swagger's "Authorize" dialog a single "Value" box for a token.
+# auto_error=False so a missing/malformed header reaches our code and we return
+# a consistent 401 (FastAPI versions differ: some answer 403 on their own).
+bearer_scheme = HTTPBearer(auto_error=False)
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
-async def get_current_user(db: DbSession, token: Annotated[str, Depends(oauth2_scheme)]) -> User:
+async def get_current_user(
+    db: DbSession,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+) -> User:
     unauthorized = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    user_id = decode_access_token(token)
+    if credentials is None:
+        raise unauthorized
+    user_id = decode_access_token(credentials.credentials)
     if user_id is None:
         raise unauthorized
     # Look the user up on every request: a deleted user's old token stops working.

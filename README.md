@@ -43,8 +43,10 @@ curl localhost:8000/health
 Open http://localhost:8000/docs (Swagger UI).
 
 1. `POST /auth/register` with an email and a password of 8+ characters.
-2. Click **Authorize**, enter the email as `username` plus the password, and submit.
-   Swagger now sends your token on every request. Tokens expire after 30 minutes.
+2. Run `POST /auth/login` (email in the `username` field) and copy the `access_token`
+   from the response. Click **Authorize**, paste the token into the **Value** box
+   (no `Bearer ` prefix needed) and confirm. Swagger now sends
+   `Authorization: Bearer <token>` on every request. Tokens expire after 30 minutes.
 3. Try `/auth/me` and the `/collections` endpoints.
 
 Or with curl:
