@@ -10,6 +10,7 @@ from sqlalchemy.pool import NullPool
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.main import app
+from app.models import Base
 
 # Tests use their own database so they can never touch your dev data.
 # Derived from DATABASE_URL: same server and credentials, different DB name.
@@ -43,22 +44,32 @@ async def _ensure_test_database() -> None:
 async def test_engine():
     await _ensure_test_database()
     engine = create_async_engine(TEST_DB_URL, poolclass=NullPool)
+    # Build the schema from the models (fresh each run). Faster than running
+    # migrations; migration correctness is checked separately by hand/CI.
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
     yield engine
     await engine.dispose()
 
 
+@pytest.fixture(autouse=True)
+async def clean_tables(test_engine) -> AsyncGenerator[None]:
+    """Empty every table after each test so tests can't affect each other."""
+    yield
+    async with test_engine.begin() as conn:
+        tables = ", ".join(t.name for t in Base.metadata.sorted_tables)
+        await conn.execute(text(f"TRUNCATE {tables} CASCADE"))
+
+
 @pytest.fixture
-async def db_session(test_engine) -> AsyncGenerator[AsyncSession]:
+async def client(test_engine) -> AsyncGenerator[AsyncClient]:
     session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
-    async with session_factory() as session:
-        yield session
 
-
-@pytest.fixture
-async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient]:
-    # Swap the real get_db for one that uses the test database.
+    # Like production: every request gets its own fresh session.
     async def override_get_db() -> AsyncGenerator[AsyncSession]:
-        yield db_session
+        async with session_factory() as session:
+            yield session
 
     app.dependency_overrides[get_db] = override_get_db
     transport = ASGITransport(app=app)
