@@ -1,6 +1,9 @@
 # Secrets
 .env
 
+# Uploaded files
+storage/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -7,8 +7,12 @@ services:
       # not localhost.
       DATABASE_URL: postgresql+asyncpg://documind:documind@postgres:5432/documind
       REDIS_URL: redis://redis:6379/0
+      STORAGE_PATH: /data/storage
     ports:
       - "8000:8000"
+    volumes:
+      # Uploaded files survive container rebuilds.
+      - storage_data:/data/storage
     # Apply migrations, then start the server.
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     depends_on:
@@ -55,3 +59,4 @@ services:
 
 volumes:
   postgres_data:
+  storage_data:
