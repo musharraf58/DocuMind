@@ -5,8 +5,9 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Collection
+from app.models import Collection, Document
 from app.schemas.collection import CollectionCreate, CollectionUpdate
+from app.services.storage import StorageBackend
 
 
 async def get_owned_collection(
@@ -63,7 +64,23 @@ async def update_collection(
     return collection
 
 
-async def delete_collection(db: AsyncSession, collection_id: uuid.UUID, user_id: uuid.UUID) -> None:
+async def delete_collection(
+    db: AsyncSession, storage: StorageBackend, collection_id: uuid.UUID, user_id: uuid.UUID
+) -> None:
+    """Delete a collection together with its documents' files on disk.
+
+    The database cascade removes the document *rows*, but it knows nothing about
+    files, so we collect the storage keys first and delete those ourselves.
+    Files go first (deleting a missing file is fine), then the rows, so a failure
+    midway can be retried instead of leaving unreachable orphan files.
+    """
     collection = await get_owned_collection(db, collection_id, user_id)
-    await db.delete(collection)
+    storage_keys = (
+        await db.scalars(
+            select(Document.storage_key).where(Document.collection_id == collection.id)
+        )
+    ).all()
+    for key in storage_keys:
+        await storage.delete(key)
+    await db.delete(collection)  # ON DELETE CASCADE removes the document rows
     await db.commit()

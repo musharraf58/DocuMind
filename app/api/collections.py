@@ -3,7 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, Response, status
 
-from app.api.deps import CurrentUser, DbSession
+from app.api.deps import CurrentUser, DbSession, StorageDep
 from app.schemas.collection import CollectionCreate, CollectionRead, CollectionUpdate
 from app.services import collections as collection_service
 
@@ -38,6 +38,8 @@ async def update_collection(
 
 
 @router.delete("/{collection_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_collection(collection_id: uuid.UUID, db: DbSession, user: CurrentUser):
-    await collection_service.delete_collection(db, collection_id, user.id)
+async def delete_collection(
+    collection_id: uuid.UUID, db: DbSession, user: CurrentUser, storage: StorageDep
+):
+    await collection_service.delete_collection(db, storage, collection_id, user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

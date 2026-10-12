@@ -498,3 +498,58 @@ async def test_foreign_and_nonexistent_documents_look_identical(client, alice, b
 
     assert foreign.status_code == missing.status_code == 404
     assert foreign.json() == missing.json()
+
+
+# ---------- deleting a collection also deletes its files ----------
+
+
+async def test_deleting_a_collection_removes_all_its_files_and_rows(
+    client, alice, storage_dir
+) -> None:
+    doomed = await create_collection(client, alice, "doomed")
+    survivor = await create_collection(client, alice, "survivor")
+    docs = [
+        await _uploaded(client, alice, doomed, "a.txt", b"one"),
+        await _uploaded(client, alice, doomed, "b.pdf", make_pdf("two")),
+        await _uploaded(client, alice, doomed, "c.md", b"# three"),
+    ]
+    kept = await _uploaded(client, alice, survivor, "keep.txt", b"keep me")
+    assert len(files_on_disk(storage_dir)) == 4
+
+    response = await client.delete(f"/collections/{doomed}", headers=alice)
+
+    assert response.status_code == 204
+    # Only the other collection's file remains on disk...
+    remaining = files_on_disk(storage_dir)
+    assert len(remaining) == 1
+    assert remaining[0].read_bytes() == b"keep me"
+    # ...and the rows are gone too (cascade), while the other document is intact.
+    for doc in docs:
+        assert (await client.get(f"/documents/{doc['id']}", headers=alice)).status_code == 404
+    assert (await client.get(f"/documents/{kept['id']}", headers=alice)).status_code == 200
+
+
+async def test_deleting_a_collection_tolerates_already_missing_files(
+    client, alice, storage_dir
+) -> None:
+    collection_id = await create_collection(client, alice)
+    await _uploaded(client, alice, collection_id, "a.txt", b"one")
+    await _uploaded(client, alice, collection_id, "b.txt", b"two")
+    files_on_disk(storage_dir)[0].unlink()
+
+    response = await client.delete(f"/collections/{collection_id}", headers=alice)
+
+    assert response.status_code == 204
+    assert files_on_disk(storage_dir) == []
+
+
+async def test_other_user_cannot_delete_collection_or_its_files(
+    client, alice, bob, storage_dir
+) -> None:
+    alices = await create_collection(client, alice)
+    await _uploaded(client, alice, alices, "a.txt", b"mine")
+
+    response = await client.delete(f"/collections/{alices}", headers=bob)
+
+    assert response.status_code == 404
+    assert len(files_on_disk(storage_dir)) == 1
