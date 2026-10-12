@@ -287,3 +287,214 @@ async def test_upload_to_another_users_collection_is_404_and_stores_nothing(
 
     assert response.status_code == 404
     assert files_on_disk(storage_dir) == []
+
+
+# ---------- read / list ----------
+
+
+async def _uploaded(client, headers, collection_id, filename="a.txt", content=b"hello") -> dict:
+    response = await upload(client, headers, collection_id, filename, content)
+    assert response.status_code == 201
+    return response.json()
+
+
+async def test_get_document(client, alice) -> None:
+    collection_id = await create_collection(client, alice)
+    doc = await _uploaded(client, alice, collection_id)
+
+    response = await client.get(f"/documents/{doc['id']}", headers=alice)
+
+    assert response.status_code == 200
+    assert response.json() == doc
+    assert "storage_key" not in response.text
+
+
+async def test_list_documents_paginates_and_filters_by_status(client, alice) -> None:
+    collection_id = await create_collection(client, alice)
+    for i in range(5):
+        await _uploaded(client, alice, collection_id, f"f{i}.txt", f"content {i}".encode())
+    url = f"/collections/{collection_id}/documents"
+
+    everything = (await client.get(url, headers=alice)).json()
+    page1 = (await client.get(f"{url}?limit=2&offset=0", headers=alice)).json()
+    page2 = (await client.get(f"{url}?limit=2&offset=2", headers=alice)).json()
+    page3 = (await client.get(f"{url}?limit=2&offset=4", headers=alice)).json()
+
+    assert len(everything) == 5
+    assert page1 + page2 + page3 == everything
+    assert everything[0]["original_filename"] == "f4.txt"  # newest first
+
+    assert len((await client.get(f"{url}?status=pending", headers=alice)).json()) == 5
+    assert (await client.get(f"{url}?status=ready", headers=alice)).json() == []
+    assert (await client.get(f"{url}?status=bogus", headers=alice)).status_code == 422
+    assert (await client.get(f"{url}?limit=0", headers=alice)).status_code == 422
+
+
+async def test_list_only_shows_documents_of_that_collection(client, alice) -> None:
+    one = await create_collection(client, alice, "one")
+    two = await create_collection(client, alice, "two")
+    await _uploaded(client, alice, one, "in-one.txt", b"1")
+    await _uploaded(client, alice, two, "in-two.txt", b"2")
+
+    names = [
+        d["original_filename"]
+        for d in (await client.get(f"/collections/{one}/documents", headers=alice)).json()
+    ]
+
+    assert names == ["in-one.txt"]
+
+
+# ---------- download ----------
+
+
+async def test_download_returns_exact_bytes_with_safe_headers(client, alice) -> None:
+    collection_id = await create_collection(client, alice)
+    content = make_pdf("download me")
+    doc = await _uploaded(client, alice, collection_id, "report.pdf", content)
+
+    response = await client.get(f"/documents/{doc['id']}/download", headers=alice)
+
+    assert response.status_code == 200
+    assert response.content == content
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["content-length"] == str(len(content))
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert 'filename="report.pdf"' in response.headers["content-disposition"]
+
+
+async def test_download_streams_large_files_intact(client, alice) -> None:
+    collection_id = await create_collection(client, alice)
+    content = bytes(range(256)) * (3 * 4096)  # ~3 MB, spans several chunks
+    big = await _uploaded(client, alice, collection_id, "big.pdf", b"%PDF" + content)
+
+    response = await client.get(f"/documents/{big['id']}/download", headers=alice)
+
+    assert response.content == b"%PDF" + content
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        'we"ird.txt',
+        "semi;colon.txt",
+        "résumé.txt",
+        "tab\there.txt",
+        "new\nline.txt",
+        "a" * 400 + ".txt",
+    ],
+)
+async def test_content_disposition_cannot_be_broken_by_filename(client, alice, hostile) -> None:
+    collection_id = await create_collection(client, alice)
+    doc = await _uploaded(client, alice, collection_id, hostile, b"text")
+
+    response = await client.get(f"/documents/{doc['id']}/download", headers=alice)
+
+    header = response.headers["content-disposition"]
+    assert response.status_code == 200
+    assert "\n" not in header and "\r" not in header
+    # exactly one attachment disposition with one quoted fallback name
+    assert header.count("attachment") == 1
+    fallback = header.split('filename="', 1)[1].split('"', 1)[0]
+    assert fallback.isascii() and '"' not in fallback and ";" not in fallback
+
+
+async def test_download_when_stored_file_is_missing_is_404(client, alice, storage_dir) -> None:
+    collection_id = await create_collection(client, alice)
+    doc = await _uploaded(client, alice, collection_id)
+    for f in files_on_disk(storage_dir):
+        f.unlink()
+
+    response = await client.get(f"/documents/{doc['id']}/download", headers=alice)
+
+    assert response.status_code == 404
+
+
+# ---------- delete ----------
+
+
+async def test_delete_removes_file_and_row(client, alice, storage_dir) -> None:
+    collection_id = await create_collection(client, alice)
+    doc = await _uploaded(client, alice, collection_id)
+    assert len(files_on_disk(storage_dir)) == 1
+
+    response = await client.delete(f"/documents/{doc['id']}", headers=alice)
+
+    assert response.status_code == 204
+    assert files_on_disk(storage_dir) == []
+    assert (await client.get(f"/documents/{doc['id']}", headers=alice)).status_code == 404
+    assert (await client.get(f"/collections/{collection_id}/documents", headers=alice)).json() == []
+
+
+async def test_delete_tolerates_an_already_missing_file(client, alice, storage_dir) -> None:
+    collection_id = await create_collection(client, alice)
+    doc = await _uploaded(client, alice, collection_id)
+    for f in files_on_disk(storage_dir):
+        f.unlink()
+
+    response = await client.delete(f"/documents/{doc['id']}", headers=alice)
+
+    assert response.status_code == 204
+    assert (await client.get(f"/documents/{doc['id']}", headers=alice)).status_code == 404
+
+
+async def test_deleted_document_can_be_uploaded_again(client, alice) -> None:
+    collection_id = await create_collection(client, alice)
+    doc = await _uploaded(client, alice, collection_id, "a.txt", b"same")
+    await client.delete(f"/documents/{doc['id']}", headers=alice)
+
+    assert (await upload(client, alice, collection_id, "a.txt", b"same")).status_code == 201
+
+
+# ---------- auth ----------
+
+
+async def test_document_endpoints_require_auth(client, alice) -> None:
+    collection_id = await create_collection(client, alice)
+    doc = await _uploaded(client, alice, collection_id)
+
+    for method, url in [
+        ("GET", f"/collections/{collection_id}/documents"),
+        ("GET", f"/documents/{doc['id']}"),
+        ("GET", f"/documents/{doc['id']}/download"),
+        ("DELETE", f"/documents/{doc['id']}"),
+    ]:
+        assert (await client.request(method, url)).status_code == 401, (method, url)
+
+
+# ---------- cross-user isolation ----------
+
+
+async def test_other_user_gets_404_on_every_document_endpoint(
+    client, alice, bob, storage_dir
+) -> None:
+    alices = await create_collection(client, alice)
+    doc = await _uploaded(client, alice, alices, "secret.txt", b"alice only")
+    before = files_on_disk(storage_dir)
+
+    list_resp = await client.get(f"/collections/{alices}/documents", headers=bob)
+    get_resp = await client.get(f"/documents/{doc['id']}", headers=bob)
+    download_resp = await client.get(f"/documents/{doc['id']}/download", headers=bob)
+    delete_resp = await client.delete(f"/documents/{doc['id']}", headers=bob)
+    upload_resp = await upload(client, bob, alices, "x.txt", b"intrusion")
+
+    for response in (list_resp, get_resp, download_resp, delete_resp, upload_resp):
+        assert response.status_code == 404
+    assert b"alice only" not in download_resp.content
+
+    # Alice's data is completely untouched
+    assert files_on_disk(storage_dir) == before
+    assert (await client.get(f"/documents/{doc['id']}", headers=alice)).json() == doc
+
+
+async def test_foreign_and_nonexistent_documents_look_identical(client, alice, bob) -> None:
+    import uuid
+
+    alices = await create_collection(client, alice)
+    doc = await _uploaded(client, alice, alices)
+
+    foreign = await client.get(f"/documents/{doc['id']}", headers=bob)
+    missing = await client.get(f"/documents/{uuid.uuid4()}", headers=bob)
+
+    assert foreign.status_code == missing.status_code == 404
+    assert foreign.json() == missing.json()

@@ -1,10 +1,11 @@
 import codecs
 import hashlib
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from pathlib import PurePosixPath
 
 from fastapi import HTTPException, UploadFile
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -155,3 +156,51 @@ async def upload_document(
         await storage.delete(storage_key)
         raise
     return document
+
+
+async def get_owned_document(
+    db: AsyncSession, document_id: uuid.UUID, user_id: uuid.UUID
+) -> Document:
+    """Fetch a document only if it belongs to user_id, otherwise raise 404.
+
+    Filters by id AND owner_id in a single query; "not yours" and "doesn't
+    exist" are indistinguishable to the caller. Every document endpoint that
+    names a document goes through here.
+    """
+    document = await db.scalar(
+        select(Document).where(Document.id == document_id, Document.owner_id == user_id)
+    )
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return document
+
+
+async def list_documents(
+    db: AsyncSession,
+    collection: Collection,
+    status_filter: DocumentStatus | None,
+    limit: int,
+    offset: int,
+) -> Sequence[Document]:
+    """List documents in a collection the caller has already proven they own."""
+    query = select(Document).where(
+        Document.collection_id == collection.id, Document.owner_id == collection.owner_id
+    )
+    if status_filter is not None:
+        query = query.where(Document.status == status_filter)
+    result = await db.scalars(
+        query.order_by(Document.created_at.desc(), Document.id).limit(limit).offset(offset)
+    )
+    return result.all()
+
+
+async def delete_document(db: AsyncSession, storage: StorageBackend, document: Document) -> None:
+    """Remove the stored file, then the row.
+
+    File first: if the row delete then fails, the user can simply retry (a
+    missing file is tolerated). Row first would risk orphaned files that no
+    row points to, which nobody could ever find or clean up.
+    """
+    await storage.delete(document.storage_key)
+    await db.delete(document)
+    await db.commit()
