@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import decode_access_token
 from app.models import User
+from app.services.storage import StorageBackend, get_storage
 
 # HTTPBearer makes Swagger's "Authorize" dialog a single "Value" box for a token.
 # auto_error=False so a missing/malformed header reaches our code and we return
@@ -14,6 +15,7 @@ from app.models import User
 bearer_scheme = HTTPBearer(auto_error=False)
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
+StorageDep = Annotated[StorageBackend, Depends(get_storage)]
 
 
 async def get_current_user(

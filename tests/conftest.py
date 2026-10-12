@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -76,3 +77,11 @@ async def client(test_engine) -> AsyncGenerator[AsyncClient]:
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def storage_dir(tmp_path, monkeypatch) -> Path:
+    """Point file storage at a throwaway directory for every test."""
+    root = tmp_path / "storage"
+    monkeypatch.setattr(get_settings(), "STORAGE_PATH", str(root))
+    return root
