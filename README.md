@@ -2,7 +2,7 @@
 
 RAG knowledge base API. FastAPI (async), PostgreSQL + pgvector, SQLAlchemy 2.0 async, Redis.
 
-**Status:** Phase 1 (users, JWT auth, per-user collections).
+**Status:** Phase 2 (users, JWT auth, per-user collections, document upload and storage).
 
 ## Prerequisites
 
@@ -62,6 +62,34 @@ curl localhost:8000/collections -H "Authorization: Bearer $TOKEN"
 ```
 
 A collection that belongs to someone else returns 404, the same as one that doesn't exist.
+
+## Documents
+
+Upload files into one of your collections, then list, fetch, download or delete them.
+Allowed types: `.pdf`, `.docx`, `.md`, `.txt` (the content is checked, not just the
+extension). Max size is `MAX_UPLOAD_MB` (default 20). New documents start as `pending`.
+
+| Method | Path | What it does |
+|---|---|---|
+| POST | `/collections/{id}/documents` | Upload (multipart field `file`). 201 with the document |
+| GET | `/collections/{id}/documents` | List. `?limit=&offset=&status=pending\|processing\|ready\|failed` |
+| GET | `/documents/{id}` | Metadata for one document |
+| GET | `/documents/{id}/download` | The file itself (always as an attachment) |
+| DELETE | `/documents/{id}` | Delete the document and its stored file |
+
+Errors: `415` wrong file type, `413` too large, `422` empty or content doesn't match the
+type, `409` the same file is already in that collection. Documents you don't own return
+`404`. Deleting a collection also deletes its documents' files.
+
+```bash
+curl -X POST localhost:8000/collections/$COLLECTION_ID/documents \
+  -H "Authorization: Bearer $TOKEN" -F "file=@notes.md"
+curl -OJ localhost:8000/documents/$DOC_ID/download -H "Authorization: Bearer $TOKEN"
+```
+
+Files are stored under `STORAGE_PATH` (`./storage` locally; in Docker the `storage_data`
+named volume mounted at `/data/storage`). They are saved as `<owner id>/<document id>`;
+the uploaded filename is kept only as display metadata.
 
 ## Migrations
 
