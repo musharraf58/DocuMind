@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.models import Collection, Document, DocumentStatus
+from app.models import Chunk, Collection, Document, DocumentStatus
 from app.services.storage import StorageBackend
 
 CHUNK_SIZE = 1024 * 1024  # 1 MB
@@ -194,8 +194,26 @@ async def list_documents(
     return result.all()
 
 
+async def list_chunks(
+    db: AsyncSession, document: Document, limit: int, offset: int
+) -> Sequence[Chunk]:
+    """Chunks of a document the caller has already proven they own, in order.
+
+    Also filters on owner_id: cheap defense in depth should a caller ever pass
+    in a document that wasn't fetched through get_owned_document.
+    """
+    result = await db.scalars(
+        select(Chunk)
+        .where(Chunk.document_id == document.id, Chunk.owner_id == document.owner_id)
+        .order_by(Chunk.chunk_index)
+        .limit(limit)
+        .offset(offset)
+    )
+    return result.all()
+
+
 async def delete_document(db: AsyncSession, storage: StorageBackend, document: Document) -> None:
-    """Remove the stored file, then the row.
+    """Remove the stored file, then the row (its chunks go with it via ON DELETE CASCADE).
 
     File first: if the row delete then fails, the user can simply retry (a
     missing file is tolerated). Row first would risk orphaned files that no

@@ -44,4 +44,9 @@ class Document(Base):
         index=True,
     )
     error_message: Mapped[str | None] = mapped_column(Text, default=None)
+    # Set when processing is claimed. A "processing" document whose claim is
+    # old was abandoned (e.g. the server restarted) and may be claimed again.
+    processing_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

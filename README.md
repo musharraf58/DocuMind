@@ -2,7 +2,8 @@
 
 RAG knowledge base API. FastAPI (async), PostgreSQL + pgvector, SQLAlchemy 2.0 async, Redis.
 
-**Status:** Phase 2 (users, JWT auth, per-user collections, document upload and storage).
+**Status:** Phase 3 (users, JWT auth, per-user collections, document upload and storage,
+text extraction and chunking).
 
 ## Prerequisites
 
@@ -90,6 +91,65 @@ curl -OJ localhost:8000/documents/$DOC_ID/download -H "Authorization: Bearer $TO
 Files are stored under `STORAGE_PATH` (`./storage` locally; in Docker the `storage_data`
 named volume mounted at `/data/storage`). They are saved as `<owner id>/<document id>`;
 the uploaded filename is kept only as display metadata.
+
+## Processing: text extraction and chunking
+
+Processing turns an uploaded document into **chunks**: pieces of its text of at most
+`CHUNK_TOKENS` tokens (default 500), each sharing about `CHUNK_OVERLAP_TOKENS` (default 60)
+with the previous one. Chunks are what later phases embed and search.
+
+| Method | Path | What it does |
+|---|---|---|
+| POST | `/documents/{id}/process` | Extract and chunk now, and return the document when done |
+| GET | `/documents/{id}/chunks` | The chunks, in order. `?limit=&offset=` |
+
+```bash
+curl -X POST localhost:8000/documents/$DOC_ID/process -H "Authorization: Bearer $TOKEN"
+curl "localhost:8000/documents/$DOC_ID/chunks?limit=5" -H "Authorization: Bearer $TOKEN"
+```
+
+How it works:
+
+1. The document is marked `processing`. If another run is already processing it, you get
+   `409`. A claim older than 10 minutes counts as abandoned (say the server restarted)
+   and can be taken over.
+2. Text is extracted in a worker thread: PDF page by page (chunks get a `page_number`),
+   DOCX paragraphs and tables (headings become `section_title`), Markdown sections
+   (`#` headings become `section_title`), plain text as is. The text is then cleaned
+   (whitespace normalized, null characters removed, words hyphenated across lines rejoined).
+3. The text is split by paragraph, then line, sentence and word until pieces fit, and the
+   pieces are packed into chunks. A chunk never spans two pages or sections.
+4. In a single transaction, the old chunks are deleted, the new ones inserted, and the
+   document marked `ready`.
+
+If anything fails, the document becomes `failed` with a short `error_message` and its
+previous chunks are kept. That's still a `200` response: the request worked, the file
+didn't. You can process `ready` and `failed` documents again at any time.
+
+Deleting a document or collection deletes its chunks too.
+
+Settings (see `.env.example`):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `CHUNK_TOKENS` | 500 | Max tokens per chunk (tiktoken `cl100k_base`, an approximation) |
+| `CHUNK_OVERLAP_TOKENS` | 60 | Tokens repeated from the previous chunk; must be under half of `CHUNK_TOKENS` |
+| `MAX_EXTRACT_PAGES` | 500 | PDFs with more pages fail |
+| `MAX_EXTRACTED_CHARS` | 2000000 | Documents with more text fail |
+| `MIN_EXTRACTED_CHARS` | 50 | Documents with less text fail (typically scanned PDFs) |
+| `MAX_DOCX_UNCOMPRESSED_MB` | 100 | Zip-bomb guard: DOCX files that would expand past this fail |
+| `MAX_DOCX_ENTRIES` | 1000 | Zip-bomb guard: DOCX files with more internal parts fail |
+
+Known limitations:
+
+- `POST /process` waits for processing to finish. Phase 5 moves it to a background queue.
+- No OCR: scanned PDFs fail with "No readable text found".
+- PDFs that need a password, or use AES encryption, fail.
+- DOCX headers, footers, footnotes and comments are not extracted.
+- Extraction has no time limit (a running thread can't be stopped). The size limits keep the
+  work bounded, and the Phase 5 worker will add a real timeout.
+- tiktoken downloads its vocabulary (a few MB) the first time it runs locally. The Docker
+  image includes it at build time.
 
 ## Migrations
 

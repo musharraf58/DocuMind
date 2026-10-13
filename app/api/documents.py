@@ -7,9 +7,11 @@ from fastapi.responses import StreamingResponse
 
 from app.api.deps import CurrentUser, DbSession, StorageDep
 from app.models import DocumentStatus
+from app.schemas.chunk import ChunkRead
 from app.schemas.document import DocumentRead
 from app.services import collections as collection_service
 from app.services import documents as document_service
+from app.services import processing as processing_service
 
 router = APIRouter(tags=["documents"])
 
@@ -86,3 +88,29 @@ async def delete_document(
     document = await document_service.get_owned_document(db, document_id, user.id)
     await document_service.delete_document(db, storage, document)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/documents/{document_id}/process", response_model=DocumentRead)
+async def process_document(
+    document_id: uuid.UUID, db: DbSession, user: CurrentUser, storage: StorageDep
+):
+    """Extract and chunk the document now, waiting for the result.
+
+    Temporary: Phase 5 replaces this with a background queue. A file that
+    can't be read is not an HTTP error: the response is 200 with status
+    "failed" and an error_message. 409 if it is already being processed.
+    """
+    document = await document_service.get_owned_document(db, document_id, user.id)
+    return await processing_service.process_document(db, storage, document)
+
+
+@router.get("/documents/{document_id}/chunks", response_model=list[ChunkRead])
+async def list_chunks(
+    document_id: uuid.UUID,
+    db: DbSession,
+    user: CurrentUser,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    document = await document_service.get_owned_document(db, document_id, user.id)
+    return await document_service.list_chunks(db, document, limit, offset)

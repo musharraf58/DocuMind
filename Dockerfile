@@ -14,6 +14,11 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
+# tiktoken downloads its vocabulary on first use. Fetch it at build time so the
+# running container never needs internet access to count tokens.
+ENV TIKTOKEN_CACHE_DIR=/app/.tiktoken_cache
+RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+
 COPY alembic.ini ./
 COPY alembic ./alembic
 COPY app ./app
