@@ -79,6 +79,13 @@ async def client(test_engine) -> AsyncGenerator[AsyncClient]:
     app.dependency_overrides.clear()
 
 
+@pytest.fixture
+async def db(test_engine) -> AsyncGenerator[AsyncSession]:
+    """A session for tests that call services directly."""
+    async with async_sessionmaker(test_engine, expire_on_commit=False)() as session:
+        yield session
+
+
 @pytest.fixture(autouse=True)
 def storage_dir(tmp_path, monkeypatch) -> Path:
     """Point file storage at a throwaway directory for every test."""
