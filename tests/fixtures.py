@@ -1,7 +1,9 @@
 """Build small but real PDF and DOCX files in memory, so no binaries are committed."""
 
 import io
+import zipfile
 
+import docx
 from pypdf import PdfReader, PdfWriter
 
 
@@ -68,4 +70,34 @@ def encrypt_pdf(pdf: bytes, user_password: str) -> bytes:
     writer.encrypt(user_password, owner_password="owner", algorithm="RC4-128")
     out = io.BytesIO()
     writer.write(out)
+    return out.getvalue()
+
+
+def build_docx(blocks: list[tuple[str, object]], merge_first_row: int = 0) -> bytes:
+    """A real DOCX from ("heading", text), ("paragraph", text) and
+    ("table", [[cell, ...], ...]) blocks, in order. merge_first_row=N merges the
+    first N cells of each table's first row into one."""
+    document = docx.Document()
+    for kind, value in blocks:
+        if kind == "heading":
+            document.add_heading(value, level=1)
+        elif kind == "paragraph":
+            document.add_paragraph(value)
+        elif kind == "table":
+            table = document.add_table(rows=len(value), cols=len(value[0]))
+            for r, row in enumerate(value):
+                for c, cell in enumerate(row):
+                    table.cell(r, c).text = cell
+            if merge_first_row > 1:
+                table.cell(0, 0).merge(table.cell(0, merge_first_row - 1))
+    out = io.BytesIO()
+    document.save(out)
+    return out.getvalue()
+
+
+def build_zip(entries: dict[str, bytes]) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
     return out.getvalue()

@@ -6,6 +6,7 @@ and can be slow on big files, so call it from a worker thread.
 
 from app.services.extraction.base import ExtractionError, ExtractionLimits, Extractor, Segment
 from app.services.extraction.cleaning import clean_text
+from app.services.extraction.docx import DocxExtractor
 from app.services.extraction.pdf import PdfExtractor
 from app.services.extraction.text import MarkdownExtractor, TextExtractor
 
@@ -17,6 +18,7 @@ MAX_TITLE_LENGTH = 300
 # extension and verified against the bytes; never the client's claim.
 EXTRACTORS: dict[str, Extractor] = {
     "application/pdf": PdfExtractor(),
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": DocxExtractor(),
     "text/markdown": MarkdownExtractor(),
     "text/plain": TextExtractor(),
 }

@@ -3,7 +3,9 @@ from dataclasses import replace
 import pytest
 
 from app.services.extraction import ExtractionError, ExtractionLimits, Segment, extract
-from tests.fixtures import build_pdf, encrypt_pdf
+from tests.fixtures import build_docx, build_pdf, build_zip, encrypt_pdf
+
+DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 LIMITS = ExtractionLimits(
     max_pages=50,
@@ -129,3 +131,61 @@ def test_pdf_encrypted_with_empty_password_still_reads():
     pdf = encrypt_pdf(build_pdf([[FILLER]]), user_password="")
     [segment] = extract(pdf, "application/pdf", LIMITS)
     assert segment.text == FILLER
+
+
+# --- DOCX ---
+
+
+def test_docx_paragraphs_headings_and_tables():
+    data = build_docx(
+        [
+            ("paragraph", f"Preface. {FILLER}"),
+            ("heading", "Results"),
+            ("paragraph", "First finding."),
+            ("table", [["Metric", "Value"], ["Speed", "Fast"]]),
+            ("paragraph", "After the table."),
+            ("heading", "Conclusion"),
+            ("paragraph", "The end."),
+        ]
+    )
+    segments = extract(data, DOCX, LIMITS)
+    assert [(s.section_title, s.text) for s in segments] == [
+        (None, f"Preface. {FILLER}"),
+        ("Results", "First finding.\n\nMetric | Value\nSpeed | Fast\n\nAfter the table."),
+        ("Conclusion", "The end."),
+    ]
+    assert all(s.page_number is None for s in segments)
+
+
+def test_docx_merged_cells_are_not_repeated():
+    # The first two cells are merged into one; python-docx returns it twice.
+    data = build_docx([("table", [["a", "b", "c"]]), ("paragraph", FILLER)], merge_first_row=2)
+    [segment] = extract(data, DOCX, LIMITS)
+    assert segment.text.startswith("a b | c\n")
+
+
+def test_docx_zip_bomb_is_rejected_before_parsing():
+    # 6 MB of zeros compresses to a few KB but would expand past the 5 MB limit.
+    bomb = build_zip({"word/document.xml": b"0" * (6 * 1024 * 1024)})
+    assert len(bomb) < 100_000
+    with pytest.raises(ExtractionError, match="expands to more than 5 MB"):
+        extract(bomb, DOCX, LIMITS)
+
+
+def test_docx_with_too_many_entries_is_rejected():
+    data = build_zip({f"part{n}.xml": b"x" for n in range(101)})
+    with pytest.raises(ExtractionError, match="too many parts"):
+        extract(data, DOCX, LIMITS)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"PK\x03\x04 not really a zip",
+        build_zip({"[Content_Types].xml": b"<Types/>", "word/document.xml": b"<w:document/>"}),
+    ],
+    ids=["broken-zip", "zip-without-docx-structure"],
+)
+def test_corrupt_docx_fails_cleanly(data):
+    with pytest.raises(ExtractionError, match="not a readable DOCX"):
+        extract(data, DOCX, LIMITS)
