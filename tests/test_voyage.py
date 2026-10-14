@@ -193,3 +193,9 @@ def test_factory_selects_provider_from_settings(monkeypatch):
 
     monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "fake")
     assert isinstance(get_embedding_provider(), FakeEmbeddingProvider)
+
+
+def test_dimension_setting_must_match_database_column(monkeypatch):
+    monkeypatch.setattr(get_settings(), "EMBEDDING_DIMENSIONS", 512)
+    with pytest.raises(EmbeddingError, match="don't match the database"):
+        get_embedding_provider()
