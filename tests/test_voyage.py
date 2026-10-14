@@ -192,7 +192,11 @@ def test_factory_selects_provider_from_settings(monkeypatch):
     assert (provider.model, provider.dimensions, provider.batch_size) == ("voyage-4-lite", 1024, 7)
 
     monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "fake")
-    assert isinstance(get_embedding_provider(), FakeEmbeddingProvider)
+    fake = get_embedding_provider()
+    assert isinstance(fake, FakeEmbeddingProvider)
+    # Never labelled with the real model's name, or fake vectors stored during
+    # development would be searched alongside real ones.
+    assert fake.model == "fake-sha256" != settings.EMBEDDING_MODEL
 
 
 def test_dimension_setting_must_match_database_column(monkeypatch):

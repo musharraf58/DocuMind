@@ -19,6 +19,8 @@ __all__ = [
     "get_embedding_provider",
 ]
 
+FAKE_MODEL_NAME = "fake-sha256"
+
 
 def get_embedding_provider() -> EmbeddingProvider:
     """The provider selected by EMBEDDING_PROVIDER. Also a FastAPI dependency,
@@ -36,7 +38,10 @@ def get_embedding_provider() -> EmbeddingProvider:
         "max_retries": settings.EMBEDDING_MAX_RETRIES,
     }
     if settings.EMBEDDING_PROVIDER == "fake":
-        return FakeEmbeddingProvider(**common)
+        # Its own model name, never the real one: fake vectors stored during
+        # development must not be mistaken for real ones after switching to
+        # the real provider (search compares only vectors from the same model).
+        return FakeEmbeddingProvider(**{**common, "model": FAKE_MODEL_NAME})
     return VoyageEmbeddingProvider(
         api_key=settings.EMBEDDING_API_KEY,
         timeout=settings.EMBEDDING_TIMEOUT_SECONDS,
