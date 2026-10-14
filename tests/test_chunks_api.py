@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import func, select, update
 
+from app.core.config import get_settings
 from app.models import Chunk, Document, DocumentStatus
 from tests.fixtures import build_pdf
 from tests.helpers import auth_headers, create_collection, upload
@@ -134,3 +135,11 @@ async def test_chunks_are_removed_when_collection_is_deleted(client, db):
     response = await client.delete(f"/collections/{collection_id}", headers=headers)
     assert response.status_code == 204
     assert await chunk_count(db, doc_id) == 0
+
+
+async def test_process_returns_503_when_embedding_is_misconfigured(client, monkeypatch):
+    headers, _, doc_id = await setup_document(client)
+    monkeypatch.setattr(get_settings(), "EMBEDDING_DIMENSIONS", 512)
+    response = await client.post(f"/documents/{doc_id}/process", headers=headers)
+    assert response.status_code == 503
+    assert "don't match the database" in response.json()["detail"]

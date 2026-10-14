@@ -5,7 +5,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import CurrentUser, DbSession, StorageDep
+from app.api.deps import CurrentUser, DbSession, EmbedderDep, StorageDep
 from app.models import DocumentStatus
 from app.schemas.chunk import ChunkRead
 from app.schemas.document import DocumentRead
@@ -92,16 +92,20 @@ async def delete_document(
 
 @router.post("/documents/{document_id}/process", response_model=DocumentRead)
 async def process_document(
-    document_id: uuid.UUID, db: DbSession, user: CurrentUser, storage: StorageDep
+    document_id: uuid.UUID,
+    db: DbSession,
+    user: CurrentUser,
+    storage: StorageDep,
+    embedder: EmbedderDep,
 ):
-    """Extract and chunk the document now, waiting for the result.
+    """Extract, chunk and embed the document now, waiting for the result.
 
     Temporary: Phase 5 replaces this with a background queue. A file that
     can't be read is not an HTTP error: the response is 200 with status
     "failed" and an error_message. 409 if it is already being processed.
     """
     document = await document_service.get_owned_document(db, document_id, user.id)
-    return await processing_service.process_document(db, storage, document)
+    return await processing_service.process_document(db, storage, embedder, document)
 
 
 @router.get("/documents/{document_id}/chunks", response_model=list[ChunkRead])

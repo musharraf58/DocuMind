@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import decode_access_token
 from app.models import User
+from app.services.embeddings import EmbeddingError, EmbeddingProvider, get_embedding_provider
 from app.services.storage import StorageBackend, get_storage
 
 # HTTPBearer makes Swagger's "Authorize" dialog a single "Value" box for a token.
@@ -16,6 +17,18 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 StorageDep = Annotated[StorageBackend, Depends(get_storage)]
+
+
+def embedding_provider() -> EmbeddingProvider:
+    """FastAPI dependency. A misconfiguration (e.g. dimension mismatch) is a
+    503 with the safe explanation rather than a bare 500."""
+    try:
+        return get_embedding_provider()
+    except EmbeddingError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+EmbedderDep = Annotated[EmbeddingProvider, Depends(embedding_provider)]
 
 
 async def get_current_user(
