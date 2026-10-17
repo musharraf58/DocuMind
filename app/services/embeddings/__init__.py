@@ -72,6 +72,7 @@ def get_embedding_provider() -> EmbeddingProvider:
         "retry_base_seconds": settings.EMBEDDING_RETRY_BASE_SECONDS,
         "retry_max_seconds": settings.EMBEDDING_RETRY_MAX_SECONDS,
         "query_max_wait": settings.EMBEDDING_QUERY_MAX_WAIT_SECONDS,
+        "min_retry_wait": settings.embedding_min_retry_wait,
     }
     if settings.EMBEDDING_PROVIDER == "fake":
         # Its own model name, never the real one: fake vectors stored during

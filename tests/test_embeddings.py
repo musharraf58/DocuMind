@@ -216,6 +216,67 @@ async def test_backoff_grows_exponentially_with_jitter_and_is_capped():
     assert len({provider._retry_delay(0, None) for _ in range(50)}) > 1  # really random
 
 
+async def test_429_waits_grow_from_the_minimum_with_jitter_on_top():
+    provider = ScriptedProvider(min_retry_wait=20, retry_max_seconds=60)
+    for _ in range(50):
+        assert 20 <= provider._retry_delay(0, None, rate_limited=True) <= 25
+        assert 40 <= provider._retry_delay(1, None, rate_limited=True) <= 50
+        assert 60 <= provider._retry_delay(2, None, rate_limited=True) <= 75  # capped at 60
+        assert 60 <= provider._retry_delay(9, None, rate_limited=True) <= 75
+        # A Retry-After below the minimum doesn't shorten the wait...
+        assert 20 <= provider._retry_delay(0, 3, rate_limited=True) <= 25
+        # ...and one above it is honoured.
+        assert 45 <= provider._retry_delay(0, 45, rate_limited=True) <= 56.25
+    # Other errors keep the short backoff: they say nothing about our quota.
+    assert provider._retry_delay(0, None, rate_limited=False) <= 2
+
+
+async def test_minimum_wait_wins_even_above_the_backoff_cap():
+    provider = ScriptedProvider(min_retry_wait=90, retry_max_seconds=60)
+    assert provider._retry_delay(0, None, rate_limited=True) >= 90
+
+
+async def test_retries_after_429s_never_exceed_the_real_limits():
+    """The reported case: 3 requests and 10,000 tokens per minute, a 33-chunk
+    document, and the provider answering 429 several times. Every attempt,
+    including each failed one, must count, so that no 60-second window ever
+    holds more than our budget (2 requests, 5,000 tokens), let alone the real limit."""
+    clock = FakeClock()
+    rate_limited = RetryableEmbeddingError("429", rate_limited=True)
+    provider = limited_provider(
+        clock,
+        tokens=5000,
+        requests=2,
+        reserve_tokens=250,
+        reserve_requests=1,
+        failures=[rate_limited] * 4,
+        min_retry_wait=20,
+    )
+    await provider.embed_documents(texts(33), token_counts=[374] * 33)
+
+    assert len(provider.calls) == 4 + 3  # four failed attempts, then three batches
+    tokens_per_attempt = [len(batch) * 374 for batch, _ in provider.calls]
+    window_ok(provider.times, tokens_per_attempt, 5000, 2)
+    gaps = [b - a for a, b in zip(provider.times, provider.times[1:], strict=False)]
+    assert min(gaps) >= 20  # nothing ever fired within seconds of a failure
+
+
+async def test_query_after_a_429_reports_busy_instead_of_retrying_quickly():
+    clock = FakeClock()
+    provider = limited_provider(
+        clock,
+        requests=10,
+        failures=[RetryableEmbeddingError("429", rate_limited=True)],
+        min_retry_wait=20,
+        query_max_wait=20,
+    )
+    with pytest.raises(EmbeddingBusyError) as info:
+        await provider.embed_query("anything")
+    assert 20 <= info.value.retry_after <= 25
+    assert len(provider.calls) == 1  # no second attempt
+    assert clock.now == 1000.0  # and no waiting
+
+
 async def test_retry_after_beyond_ceiling_fails_with_a_retry_time():
     provider = ScriptedProvider(failures=[RetryableEmbeddingError("429", retry_after=300)])
     with pytest.raises(EmbeddingBusyError, match="retry in about 300 seconds"):
@@ -287,22 +348,21 @@ async def test_retry_after_on_429_is_honoured_through_the_limiter():
     )
     await provider.embed_documents(texts(1), token_counts=[10])
     first, second = provider.times
-    assert second - first >= 30
-    assert second - first < 31  # and it didn't wait on top of that
+    assert 30 <= second - first <= 30 * 1.25 + 0.1  # Retry-After, plus jitter on top
 
 
-async def test_429_without_retry_after_uses_backoff_and_holds_the_limiter():
+async def test_429_without_retry_after_waits_at_least_the_minimum():
     clock = FakeClock()
     provider = limited_provider(
         clock,
         requests=10,
         failures=[RetryableEmbeddingError("429", rate_limited=True)],
-        retry_base_seconds=8,
-        retry_max_seconds=60,
+        retry_base_seconds=2,  # only for other errors; a 429 never retries this fast
+        min_retry_wait=20,
     )
     await provider.embed_documents(texts(1), token_counts=[10])
     first, second = provider.times
-    assert 4 <= second - first <= 8.1  # base 8 s, jittered to 50-100%
+    assert 20 <= second - first <= 25.1
 
 
 async def test_a_429_holds_other_callers_too():
@@ -316,7 +376,7 @@ async def test_a_429_holds_other_callers_too():
     # The provider said "come back in 40 s": a different caller sharing the
     # limiter now (at the moment of the 429) would have to wait for that too.
     first = provider.times[0]
-    assert provider.limiter._blocked_until == pytest.approx(first + 40)
+    assert first + 40 <= provider.limiter._blocked_until <= first + 50
 
 
 async def test_server_errors_do_not_hold_the_limiter():
@@ -459,7 +519,7 @@ async def test_query_is_held_up_while_the_provider_says_to_back_off():
 
     with pytest.raises(EmbeddingBusyError) as info:
         await provider.embed_query("anyone there?")
-    assert 39 < info.value.retry_after <= 40
+    assert 39 < info.value.retry_after <= 50  # 40 s plus up to 25% jitter
     await document  # and the document itself does finish once the time has passed
 
 

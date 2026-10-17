@@ -60,6 +60,7 @@ class EmbeddingProvider(ABC):
         retry_base_seconds: float = 2.0,
         retry_max_seconds: float = 60.0,
         query_max_wait: float | None = 20.0,
+        min_retry_wait: float = 20.0,
     ) -> None:
         self.model = model
         self.dimensions = dimensions
@@ -69,6 +70,7 @@ class EmbeddingProvider(ABC):
         self.retry_base_seconds = retry_base_seconds
         self.retry_max_seconds = retry_max_seconds
         self.query_max_wait = query_max_wait
+        self.min_retry_wait = min_retry_wait
         self._sleep = sleep  # replaceable so tests don't actually wait
         # Most tokens we put in one request. Our tokenizer only approximates the
         # provider's, so the provider's own cap counts at half.
@@ -231,7 +233,7 @@ class EmbeddingProvider(ABC):
             except RetryableEmbeddingError as exc:
                 if attempt >= self.max_retries:
                     raise
-                delay = self._retry_delay(attempt, exc.retry_after)
+                delay = self._retry_delay(attempt, exc.retry_after, exc.rate_limited)
                 attempt += 1
                 if exc.rate_limited and self.limiter is not None:
                     # Hold every caller, not just this one, until the provider is
@@ -262,18 +264,30 @@ class EmbeddingProvider(ABC):
         self._check_vectors(result.vectors, len(texts))
         return result, waited
 
-    def _retry_delay(self, attempt: int, retry_after: float | None) -> float:
+    def _retry_delay(
+        self, attempt: int, retry_after: float | None, rate_limited: bool = False
+    ) -> float:
         """How long to wait before retry number attempt+1.
 
-        The provider's Retry-After, when it sent one, is its explicit
-        instruction and is used as is. Otherwise: exponential backoff
-        (base, 2x base, 4x base, ... up to the cap), each scaled by a random
-        50-100% ("jitter") so many clients that failed together don't all
-        retry at the same instant.
+        After a 429 ("too many requests"), retrying within seconds only spends
+        more of the per-minute allowance and keeps the window full. So the wait
+        is at least the provider's Retry-After and at least min_retry_wait
+        (by default the spacing at which requests stay under the limit),
+        doubling on each further 429 up to the cap, plus 0-25% jitter added on
+        top, never subtracted.
+
+        Other failures (server errors, timeouts) say nothing about our quota:
+        Retry-After if given, else short exponential backoff with jitter.
+        Either way, many clients that failed together don't all retry at the
+        same instant.
         """
+        if retry_after is not None and retry_after > RETRY_AFTER_CEILING_SECONDS:
+            raise EmbeddingBusyError(retry_after=retry_after)
+        if rate_limited:
+            growing = min(self.retry_max_seconds, self.min_retry_wait * 2**attempt)
+            wait = max(self.min_retry_wait, growing, retry_after or 0.0)
+            return wait + random.uniform(0, 0.25 * wait)
         if retry_after is not None:
-            if retry_after > RETRY_AFTER_CEILING_SECONDS:
-                raise EmbeddingBusyError(retry_after=retry_after)
             return retry_after
         delay = min(self.retry_max_seconds, self.retry_base_seconds * 2**attempt)
         return delay * random.uniform(0.5, 1.0)

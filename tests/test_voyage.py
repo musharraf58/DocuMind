@@ -116,8 +116,24 @@ async def test_gives_up_with_safe_message_after_retries():
     assert str(info.value) == "Embedding service is unavailable; try again later"
 
 
-async def test_retry_after_header_is_used():
+async def test_retry_after_header_is_used_when_longer_than_the_minimum():
+    responses = iter([httpx.Response(429, headers={"Retry-After": "45"})])
+    provider = voyage(lambda request: next(responses, None) or success(request))
+    await provider.embed_documents(["x"])
+    [delay] = provider._sleep.delays
+    assert 45 <= delay <= 45 * 1.25
+
+
+async def test_short_retry_after_on_429_is_raised_to_the_minimum():
     responses = iter([httpx.Response(429, headers={"Retry-After": "3"})])
+    provider = voyage(lambda request: next(responses, None) or success(request), min_retry_wait=20)
+    await provider.embed_documents(["x"])
+    [delay] = provider._sleep.delays
+    assert 20 <= delay <= 25
+
+
+async def test_retry_after_on_503_is_used_as_is():
+    responses = iter([httpx.Response(503, headers={"Retry-After": "3"})])
     provider = voyage(lambda request: next(responses, None) or success(request))
     await provider.embed_documents(["x"])
     assert provider._sleep.delays == [3]
@@ -184,7 +200,7 @@ async def test_429_with_retry_after_waits_that_long_through_the_shared_limiter()
 
     provider = voyage(handler, limiter=limiter, sleep=clock.sleep)
     assert len(await provider.embed_documents(["x"], token_counts=[5])) == 1
-    assert 25 <= times[1] - times[0] < 26
+    assert 25 <= times[1] - times[0] <= 25 * 1.25 + 0.1
 
 
 async def test_retry_after_http_date_or_garbage_falls_back_to_backoff():
@@ -195,10 +211,10 @@ async def test_retry_after_http_date_or_garbage_falls_back_to_backoff():
     provider = voyage(
         lambda request: next(responses, None) or success(request),
         sleep=clock.sleep,
-        retry_base_seconds=4,
+        min_retry_wait=20,
     )
     await provider.embed_documents(["x"])
-    assert 2 <= clock.sleeps[0] <= 4
+    assert 20 <= clock.sleeps[0] <= 25  # unparseable header: the minimum wait applies
 
 
 def test_token_limit_follows_model():
