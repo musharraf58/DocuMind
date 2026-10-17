@@ -74,6 +74,7 @@ def limited_provider(
     requests: int = 2,
     reserve_tokens: int = 0,
     reserve_requests: int = 0,
+    provider_cls: type[ScriptedProvider] | None = None,
     **kwargs,
 ) -> ScriptedProvider:
     """A provider whose every request goes through a rate limiter running on `clock`."""
@@ -85,7 +86,8 @@ def limited_provider(
         clock=clock.clock,
         sleep=clock.sleep,
     )
-    return ScriptedProvider(limiter=limiter, sleep=clock.sleep, now=clock.clock, **kwargs)
+    cls = provider_cls or ScriptedProvider
+    return cls(limiter=limiter, sleep=clock.sleep, now=clock.clock, **kwargs)
 
 
 class KeywordProvider(FakeEmbeddingProvider):

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import math
 import random
 
@@ -340,6 +341,49 @@ async def test_chunk_over_the_limiters_document_share_is_refused():
     with pytest.raises(RequestTooLargeError):
         await provider.embed_documents(texts(1), token_counts=[950])
     assert provider.calls == []
+
+
+# --- Logging ---
+
+
+async def test_progress_is_logged_per_batch(caplog):
+    caplog.set_level(logging.INFO, logger="app")
+    clock = FakeClock()
+    provider = limited_provider(
+        clock, tokens=8000, requests=2, reserve_tokens=400, reserve_requests=1
+    )
+    await provider.embed_documents(texts(96), token_counts=[500] * 96)
+
+    lines = [r.getMessage() for r in caplog.records if r.name == "app.services.embeddings.base"]
+    assert lines[0].startswith("Embedding 96 chunks (~48000 tokens) in 7 batches")
+    assert "about 6 min" in lines[0]
+    progress = [line for line in lines if line.startswith("embedded ")]
+    assert len(progress) == 7
+    assert progress[0].startswith("embedded 15/96 chunks (batch 1/7: ~7500 tokens estimated")
+    assert "waited 0.0s" in progress[0]  # the first batch goes straight out
+    assert "waited 60.0s" in progress[1]  # later ones wait for the minute to pass
+    assert progress[-1].startswith("embedded 96/96 chunks (batch 7/7")
+    assert lines[-1].startswith("Embedding finished: 96 chunks, 7 requests")
+
+
+async def test_retry_warnings_are_logged_without_secrets(caplog):
+    caplog.set_level(logging.INFO, logger="app")
+    provider = ScriptedProvider(failures=[RetryableEmbeddingError("Embedding service timed out")])
+    await provider.embed_documents(texts(1))
+    assert "retry 1/6" in caplog.text
+    assert "Embedding service timed out" in caplog.text
+
+
+async def test_heartbeat_is_awaited_before_every_attempt_including_retries():
+    beats = []
+
+    async def heartbeat():
+        beats.append(len(provider.calls))  # how many requests had been sent by then
+
+    provider = ScriptedProvider(batch_size=1, failures=[RetryableEmbeddingError("503")])
+    await provider.embed_documents(texts(2), heartbeat=heartbeat)
+    # attempt 1 (fails), attempt 2 (retry, ok), attempt 3 (second batch)
+    assert beats == [0, 1, 2]
 
 
 # --- Queries never wait for long ---

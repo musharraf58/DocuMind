@@ -7,12 +7,13 @@ import pytest
 from fastapi import HTTPException
 from pydantic import SecretStr
 from sqlalchemy import func, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import Chunk, Document, DocumentStatus
 from app.services import processing
 from app.services.chunking import ChunkData
 from app.services.embeddings import (
+    EmbeddingError,
     EmbeddingProvider,
     FakeEmbeddingProvider,
     RetryableEmbeddingError,
@@ -21,7 +22,13 @@ from app.services.embeddings import (
 from app.services.embeddings.fake import fake_vector
 from app.services.processing import GENERIC_ERROR, process_document
 from app.services.storage import get_storage
-from tests.embedding_fakes import DIMENSIONS, RecordingSleep, ScriptedProvider
+from tests.embedding_fakes import (
+    DIMENSIONS,
+    FakeClock,
+    RecordingSleep,
+    ScriptedProvider,
+    limited_provider,
+)
 from tests.fixtures import build_docx, build_pdf
 from tests.helpers import auth_headers, create_collection, upload
 
@@ -233,6 +240,119 @@ async def test_extraction_runs_off_the_event_loop_thread(client, db, monkeypatch
     await run(db, document)
 
     assert seen["thread"] is not threading.current_thread()
+
+
+# --- Long, rate-limited runs ---
+
+
+def fake_chunks(count: int, tokens: int) -> list[ChunkData]:
+    return [ChunkData(i, f"Chunk number {i}.", None, None, tokens) for i in range(count)]
+
+
+async def test_long_rate_limited_run_completes_and_keeps_its_claim(
+    client, db, test_engine, monkeypatch
+):
+    # 200 chunks x 500 tokens = 100,000 tokens, at 7,600 per minute: about 13
+    # minutes of simulated time, longer than the 10 minutes after which an
+    # unrefreshed "processing" claim counts as abandoned.
+    monkeypatch.setattr(processing, "chunk_segments", lambda *args: fake_chunks(200, tokens=500))
+    clock = FakeClock()
+    real_start = datetime.now(UTC)
+    monkeypatch.setattr(
+        processing, "utcnow", lambda: real_start + timedelta(seconds=clock.now - 1000)
+    )
+    document = await uploaded(client, db, "notes.txt", FILLER.encode())
+    other_sessions = async_sessionmaker(test_engine, expire_on_commit=False)
+    probes: list[tuple[timedelta, bool]] = []
+
+    class Probe(ScriptedProvider):
+        async def _embed_batch(self, texts, input_type):
+            # What a second request would see right now, mid-run, from its own session.
+            async with other_sessions() as other:
+                row = await other.get(Document, document.id)
+                age = processing.utcnow() - row.processing_started_at
+                try:
+                    await processing.claim_for_processing(other, row)
+                    taken_over = True
+                except HTTPException as exc:
+                    assert exc.status_code == 409
+                    taken_over = False
+            probes.append((age, taken_over))
+            return await super()._embed_batch(texts, input_type)
+
+    provider = limited_provider(
+        clock, reserve_tokens=400, reserve_requests=1, provider_cls=Probe, model="long-run-model"
+    )
+    await run(db, document, provider)
+
+    assert document.status == DocumentStatus.ready
+    assert len(provider.calls) == 14
+    assert clock.now - 1000 > 12 * 60  # really did take longer than the stale limit...
+    assert not any(taken for _, taken in probes)  # ...yet never looked abandoned
+    assert max(age for age, _ in probes) < timedelta(minutes=2)
+    stored = await stored_chunks(db, document)
+    assert len(stored) == 200
+    assert all(c.embedding is not None and c.embedding_model == "long-run-model" for c in stored)
+
+
+async def test_nothing_is_written_while_a_long_run_waits(client, db, test_engine, monkeypatch):
+    """Until every batch has succeeded, the database still shows the old state."""
+    document = await uploaded(client, db, "notes.txt", (FILLER * 300).encode())
+    await run(db, document)
+    before = [(c.id, c.embedding_model) for c in await stored_chunks(db, document)]
+
+    monkeypatch.setattr(processing, "chunk_segments", lambda *args: fake_chunks(40, tokens=500))
+    clock = FakeClock()
+    other_sessions = async_sessionmaker(test_engine, expire_on_commit=False)
+    seen_during_run: list[list[tuple]] = []
+
+    class Peek(ScriptedProvider):
+        async def _embed_batch(self, texts, input_type):
+            async with other_sessions() as other:
+                rows = await other.scalars(
+                    select(Chunk)
+                    .where(Chunk.document_id == document.id)
+                    .order_by(Chunk.chunk_index)
+                )
+                seen_during_run.append([(c.id, c.embedding_model) for c in rows])
+            return await super()._embed_batch(texts, input_type)
+
+    provider = limited_provider(clock, reserve_tokens=400, reserve_requests=1, provider_cls=Peek)
+    await run(db, document, provider)
+
+    assert len(seen_during_run) == len(provider.calls) > 2
+    assert all(snapshot == before for snapshot in seen_during_run)  # old chunks until the end
+    after = await stored_chunks(db, document)
+    assert len(after) == 40 and {c.embedding_model for c in after} == {"test-model"}
+
+
+async def test_failure_late_in_a_long_run_keeps_the_old_chunks(client, db, monkeypatch):
+    document = await uploaded(client, db, "notes.txt", (FILLER * 300).encode())
+    await run(db, document)
+    before = [(c.id, list(c.embedding)) for c in await stored_chunks(db, document)]
+
+    monkeypatch.setattr(processing, "chunk_segments", lambda *args: fake_chunks(60, tokens=500))
+    clock = FakeClock()
+    # Batches 1-3 succeed (minutes pass); then the provider rejects everything.
+    provider = limited_provider(clock, reserve_tokens=400, reserve_requests=1, max_retries=0)
+    real = provider._embed_batch
+    sent = 0
+
+    async def flaky(texts, input_type):
+        nonlocal sent
+        sent += 1
+        if sent > 3:
+            raise EmbeddingError("Embedding service rejected the API key")
+        return await real(texts, input_type)
+
+    provider._embed_batch = flaky
+    await run(db, document, provider)
+
+    assert sent == 4
+    assert document.status == DocumentStatus.failed
+    assert document.error_message == "Embedding service rejected the API key"
+    after = [(c.id, list(c.embedding)) for c in await stored_chunks(db, document)]
+    assert after == before
 
 
 # --- Embeddings ---

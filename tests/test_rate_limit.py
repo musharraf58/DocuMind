@@ -192,3 +192,21 @@ def test_estimate_seconds():
     assert estimate_seconds(0, 8000) == 0
     assert estimate_seconds(8000, 8000) == 0  # fits in the first window
     assert estimate_seconds(48_000, 8000) == 300  # six windows' worth: 5 waits of 60 s
+
+
+async def test_works_with_the_real_clock_and_sleep():
+    """Everything above runs on a fake clock. This uses the real one, with a
+    window of 0.3 s instead of 60 s so it takes about a second."""
+    import time
+
+    limiter = SlidingWindowRateLimiter(token_budget=1000, request_budget=2, window=0.3)
+    sent: list[tuple[float, int]] = []
+    start = time.monotonic()
+    for _ in range(6):
+        await limiter.acquire(10)
+        sent.append((time.monotonic(), 10))
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= 0.6 - 0.05  # 6 requests at 2 per 0.3 s: two full windows of waiting
+    for at, _ in sent:
+        assert sum(1 for t, _ in sent if at - 0.3 < t <= at) <= 2

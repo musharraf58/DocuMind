@@ -31,13 +31,18 @@ GENERIC_ERROR = "Could not read this file"
 MAX_ERROR_LENGTH = 500
 
 
+def utcnow() -> datetime:
+    """The current time. A function so tests can run a long job on a fake clock."""
+    return datetime.now(UTC)
+
+
 async def claim_for_processing(db: AsyncSession, document: Document) -> None:
     """Mark the document "processing", or raise 409 if someone else already is.
 
     Check and update happen in a single UPDATE ... WHERE, so two simultaneous
     requests can't both win: the database lets exactly one of them match.
     """
-    now = datetime.now(UTC)
+    now = utcnow()
     claimed = await db.scalar(
         update(Document)
         .where(
@@ -75,6 +80,18 @@ def _drop_blank(chunks: list[ChunkData]) -> list[ChunkData]:
     never reach the embedding provider. Renumbers so indexes stay 0..n-1."""
     kept = [chunk for chunk in chunks if chunk.content.strip()]
     return [replace(chunk, chunk_index=i) for i, chunk in enumerate(kept)]
+
+
+async def _heartbeat(db: AsyncSession, document_id: uuid.UUID) -> None:
+    """Show the run is alive. Embedding can take longer than STALE_PROCESSING_AFTER
+    when the provider's rate limit forces long waits, and without this another
+    request would take the document over and process it a second time in
+    parallel. One quick statement, committed immediately: nothing stays open
+    while we then wait."""
+    await db.execute(
+        update(Document).where(Document.id == document_id).values(processing_started_at=utcnow())
+    )
+    await db.commit()
 
 
 async def _replace_chunks(
@@ -154,10 +171,14 @@ async def process_document(
             extract_and_chunk, data, document.content_type, settings
         )
         chunks = _drop_blank(chunks)
-        # Network call, possibly with retries and backoff: seconds or more.
-        # No database transaction is open here (the claim was committed), so
-        # no locks or connection are held while we wait on the provider.
-        vectors = await embedder.embed_documents([chunk.content for chunk in chunks])
+        # Network calls, rate-limit waits and retries: possibly many minutes.
+        # No database transaction is open meanwhile (the claim was committed and
+        # the heartbeat commits at once), so no locks or connection are held.
+        vectors = await embedder.embed_documents(
+            [chunk.content for chunk in chunks],
+            token_counts=[chunk.token_count for chunk in chunks],
+            heartbeat=lambda: _heartbeat(db, document_id),
+        )
         logger.info(
             "Document %s: embedded %d chunks (%d tokens, model %s)",
             document_id,

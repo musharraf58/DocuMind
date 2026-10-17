@@ -1,4 +1,5 @@
 import json
+import logging
 
 import httpx
 import pytest
@@ -237,6 +238,17 @@ def test_factory_selects_provider_from_settings(monkeypatch):
     # development would be searched alongside real ones.
     assert fake.model == "fake-sha256" != settings.EMBEDDING_MODEL
     assert fake.limiter is None  # no network, so nothing to throttle
+
+
+@pytest.mark.parametrize("status", [401, 429, 503])
+async def test_api_key_and_response_body_never_reach_the_logs(caplog, status):
+    caplog.set_level(logging.DEBUG)  # everything, from every logger
+    body = {"detail": f"key {API_KEY} is bad; your input was: very secret text"}
+    provider = voyage(lambda request: httpx.Response(status, json=body), max_retries=1)
+    with pytest.raises(EmbeddingError):
+        await provider.embed_documents(["very secret text"])
+    assert API_KEY not in caplog.text
+    assert "very secret text" not in caplog.text
 
 
 def test_dimension_setting_must_match_database_column(monkeypatch):

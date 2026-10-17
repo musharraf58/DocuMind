@@ -13,12 +13,15 @@ from app.services.embeddings.errors import (
     RequestTooLargeError,
     RetryableEmbeddingError,
 )
-from app.services.embeddings.rate_limit import Kind, SlidingWindowRateLimiter
+from app.services.embeddings.rate_limit import Kind, SlidingWindowRateLimiter, estimate_seconds
 
 logger = logging.getLogger(__name__)
 
 Vector = list[float]
 InputType = Literal["document", "query"]
+# Called before every attempt to send: "I'm still alive", for callers that need
+# to prove a long run hasn't been abandoned.
+Heartbeat = Callable[[], Awaitable[None]]
 
 # The longest Retry-After we will sit through. Beyond this the work is failed
 # with a "busy, retry in N seconds" message rather than tying a request up.
@@ -77,27 +80,60 @@ class EmbeddingProvider(ABC):
         self.token_budget = min((cap for cap in caps if cap), default=None)
 
     async def embed_documents(
-        self, texts: Sequence[str], token_counts: Sequence[int] | None = None
+        self,
+        texts: Sequence[str],
+        token_counts: Sequence[int] | None = None,
+        heartbeat: Heartbeat | None = None,
     ) -> list[Vector]:
         """Embed texts for storage, returning one vector per text, in order.
 
         token_counts: how many tokens each text has, if the caller already knows
         (counting again is wasted CPU, and this runs on the event loop).
+        heartbeat: awaited before each attempt, so a caller can show the run
+        is still alive while the rate limiter makes it wait for minutes.
         """
         _reject_blank(texts)
         batches = self._plan_batches(texts, token_counts)  # fails before any request is sent
+        estimated_total = sum(tokens for _, tokens in batches)
+        if self.limiter is not None and batches:
+            seconds = estimate_seconds(estimated_total, self.limiter.document_token_budget)
+            logger.info(
+                "Embedding %d chunks (~%d tokens) in %d batches; at the current rate limit "
+                "this takes %s",
+                len(texts),
+                estimated_total,
+                len(batches),
+                f"about {round(seconds / 60)} min" if seconds >= 30 else "under a minute",
+            )
+
         vectors: list[Vector] = []
-        total_tokens = requests = 0
-        for batch, estimated_tokens in batches:
-            result, _waited = await self._send(batch, "document", estimated_tokens, "document")
+        reported_total = 0
+        waited_total = 0.0
+        for number, (batch, estimated) in enumerate(batches, start=1):
+            result, waited = await self._send(
+                batch, "document", estimated, "document", heartbeat=heartbeat
+            )
             vectors.extend(result.vectors)
-            total_tokens += result.total_tokens
-            requests += 1
+            reported_total += result.total_tokens
+            waited_total += waited
+            logger.info(
+                "embedded %d/%d chunks (batch %d/%d: ~%d tokens estimated, %d reported by "
+                "the provider, waited %.1fs)",
+                len(vectors),
+                len(texts),
+                number,
+                len(batches),
+                estimated,
+                result.total_tokens,
+                waited,
+            )
         logger.info(
-            "Embedded %d texts in %d requests (%d tokens, model %s)",
+            "Embedding finished: %d chunks, %d requests, %d tokens reported, waited %.0fs "
+            "(model %s)",
             len(texts),
-            requests,
-            total_tokens,
+            len(batches),
+            reported_total,
+            waited_total,
             self.model,
         )
         return vectors
@@ -172,6 +208,7 @@ class EmbeddingProvider(ABC):
         estimated_tokens: int,
         kind: Kind,
         max_wait: float | None = None,
+        heartbeat: Heartbeat | None = None,
     ) -> tuple[BatchResult, float]:
         """Send one batch: wait for the rate limiter, send, retry on transient
         failures. Returns the result and the seconds spent waiting.
@@ -183,6 +220,8 @@ class EmbeddingProvider(ABC):
         attempt = 0
         waited = 0.0
         while True:
+            if heartbeat is not None:
+                await heartbeat()
             if self.limiter is not None:
                 remaining = None if max_wait is None else max(0.0, max_wait - waited)
                 waited += await self.limiter.acquire(estimated_tokens, kind, max_wait=remaining)
