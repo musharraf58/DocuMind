@@ -1,4 +1,5 @@
 import logging
+import re
 
 import httpx
 from pydantic import SecretStr
@@ -75,8 +76,12 @@ class VoyageEmbeddingProvider(EmbeddingProvider):
             raise RetryableEmbeddingError("Could not reach the embedding service") from exc
 
         if response.status_code != 200:
-            # Status only: the body may contain input text.
-            logger.warning("Voyage embeddings request failed with HTTP %d", response.status_code)
+            # Status and Retry-After only: the body may contain input text.
+            logger.warning(
+                "Voyage embeddings request failed with HTTP %d (Retry-After: %s)",
+                response.status_code,
+                _header_for_log(response.headers.get("Retry-After")),
+            )
             message = MESSAGES.get(response.status_code, UNAVAILABLE)
             if response.status_code in RETRYABLE_STATUSES:
                 raise RetryableEmbeddingError(
@@ -96,6 +101,13 @@ class VoyageEmbeddingProvider(EmbeddingProvider):
         except (ValueError, KeyError, TypeError) as exc:
             raise EmbeddingError("Embedding service returned an unexpected response") from exc
         return BatchResult(vectors, tokens)
+
+
+def _header_for_log(value: str | None) -> str:
+    """A header value made safe to log: only plain characters, and short."""
+    if value is None:
+        return "none"
+    return re.sub(r"[^0-9A-Za-z ,:.+-]", "?", value)[:40]
 
 
 def _retry_after(response: httpx.Response) -> float | None:

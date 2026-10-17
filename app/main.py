@@ -7,7 +7,9 @@ from app.core.limits import MaxBodySizeMiddleware
 
 # Uvicorn sets up only its own loggers. Without this, the app's INFO messages
 # (e.g. "embedded N chunks") are silently dropped; libraries stay at WARNING.
-logging.basicConfig(level=logging.WARNING, format="%(levelname)s:     %(name)s - %(message)s")
+logging.basicConfig(
+    level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
+)
 logging.getLogger("app").setLevel(logging.INFO)
 
 app = FastAPI(title="DocuMind")

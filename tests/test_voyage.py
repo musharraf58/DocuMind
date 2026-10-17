@@ -251,6 +251,35 @@ async def test_api_key_and_response_body_never_reach_the_logs(caplog, status):
     assert "very secret text" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("headers", "logged"),
+    [
+        ({"Retry-After": "7"}, "HTTP 429 (Retry-After: 7)"),
+        ({}, "HTTP 429 (Retry-After: none)"),
+    ],
+)
+async def test_429_logs_status_and_retry_after(caplog, headers, logged):
+    caplog.set_level(logging.WARNING, logger="app")
+    responses = iter([httpx.Response(429, headers=headers)])
+    provider = voyage(lambda request: next(responses, None) or success(request))
+    await provider.embed_documents(["x"])
+    assert logged in caplog.text
+    assert API_KEY not in caplog.text
+
+
+async def test_hostile_retry_after_is_sanitized_before_logging(caplog):
+    caplog.set_level(logging.WARNING, logger="app")
+    hostile = "7\r\nX-Evil: <script>" + "x" * 100
+    responses = iter([httpx.Response(429, headers={"Retry-After": hostile})])
+    provider = voyage(lambda request: next(responses, None) or success(request))
+    await provider.embed_documents(["x"])
+
+    [line] = [r.getMessage() for r in caplog.records if "Retry-After" in r.getMessage()]
+    value = line.split("(Retry-After: ", 1)[1].rstrip(")")
+    assert len(value) <= 40
+    assert not set(value) & set("<>\r\n")
+
+
 def test_dimension_setting_must_match_database_column(monkeypatch):
     monkeypatch.setattr(get_settings(), "EMBEDDING_DIMENSIONS", 512)
     with pytest.raises(EmbeddingError, match="don't match the database"):

@@ -374,6 +374,25 @@ async def test_retry_warnings_are_logged_without_secrets(caplog):
     assert "Embedding service timed out" in caplog.text
 
 
+async def test_retry_log_reports_the_real_wait_not_just_the_backoff(caplog):
+    caplog.set_level(logging.INFO, logger="app")
+    clock = FakeClock()
+    # Documents may send one request per minute. After a 429 the backoff alone
+    # might say "2 s", but the next attempt really goes out a minute later.
+    provider = limited_provider(
+        clock,
+        requests=2,
+        reserve_requests=1,
+        failures=[RetryableEmbeddingError("rate limited", rate_limited=True)],
+        retry_base_seconds=2,
+    )
+    await provider.embed_documents(texts(1), token_counts=[10])
+
+    first, second = provider.times
+    assert second - first == pytest.approx(60, abs=0.1)
+    assert "retry 1/6 in about 60s (rate-limit window)" in caplog.text
+
+
 async def test_heartbeat_is_awaited_before_every_attempt_including_retries():
     beats = []
 

@@ -233,18 +233,28 @@ class EmbeddingProvider(ABC):
                     raise
                 delay = self._retry_delay(attempt, exc.retry_after)
                 attempt += 1
+                if exc.rate_limited and self.limiter is not None:
+                    # Hold every caller, not just this one, until the provider is
+                    # ready again; the next acquire() does the actual waiting,
+                    # which can be longer than `delay` if the window is full.
+                    self.limiter.penalize(delay)
+                    real_wait = self.limiter.time_until_available(estimated_tokens, kind)
+                    logger.warning(
+                        "Embedding request failed (%s); retry %d/%d in about %.0fs%s",
+                        exc,
+                        attempt,
+                        self.max_retries,
+                        real_wait,
+                        " (rate-limit window)" if real_wait > delay + 1 else "",
+                    )
+                    continue
                 logger.warning(
-                    "Embedding request failed (%s); retry %d/%d in %.1fs",
+                    "Embedding request failed (%s); retry %d/%d in about %.0fs",
                     exc,
                     attempt,
                     self.max_retries,
                     delay,
                 )
-                if exc.rate_limited and self.limiter is not None:
-                    # Hold every caller, not just this one, until the provider is
-                    # ready again; the next acquire() does the actual waiting.
-                    self.limiter.penalize(delay)
-                    continue
                 if max_wait is not None and waited + delay > max_wait:
                     raise EmbeddingBusyError(retry_after=delay) from exc
                 await self._sleep(delay)

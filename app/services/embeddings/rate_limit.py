@@ -72,6 +72,17 @@ class SlidingWindowRateLimiter:
         self._expire(self._clock())
         return len(self._sent), sum(sent.tokens for sent in self._sent)
 
+    def time_until_available(self, tokens: int, kind: Kind = "document") -> float:
+        """Seconds until a request of `tokens` tokens could be sent, without
+        reserving anything (for logging and planning)."""
+        token_cap, request_cap = self._caps(kind)
+        return self._wait_needed(self._clock(), tokens, token_cap, request_cap)
+
+    def _caps(self, kind: Kind) -> tuple[int, int]:
+        if kind == "query":
+            return self.token_budget, self.request_budget
+        return self.document_token_budget, self.document_request_budget
+
     def penalize(self, seconds: float) -> None:
         """The provider said "come back in `seconds`": hold everyone until then."""
         self._blocked_until = max(self._blocked_until, self._clock() + seconds)
@@ -91,8 +102,7 @@ class SlidingWindowRateLimiter:
         outside the check, so a waiting document never blocks a query from
         checking (and failing fast).
         """
-        token_cap = self.max_tokens(kind)
-        request_cap = self.request_budget if kind == "query" else self.document_request_budget
+        token_cap, request_cap = self._caps(kind)
         if tokens > token_cap:
             raise RequestTooLargeError(
                 f"Text is too large for the embedding rate limit "

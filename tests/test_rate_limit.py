@@ -188,6 +188,18 @@ async def test_concurrent_callers_together_stay_within_budget():
     windows_ok(sent, 5000, 3)
 
 
+async def test_time_until_available_matches_acquire_and_reserves_nothing():
+    clock = FakeClock()
+    limiter = make(clock, requests=1)
+    await limiter.acquire(10)
+    clock.now += 15
+
+    assert limiter.time_until_available(10) == pytest.approx(45)
+    assert limiter.usage() == (1, 10)  # only looked
+    waited = await limiter.acquire(10)
+    assert waited == pytest.approx(45 + PAD)
+
+
 def test_estimate_seconds():
     assert estimate_seconds(0, 8000) == 0
     assert estimate_seconds(8000, 8000) == 0  # fits in the first window
