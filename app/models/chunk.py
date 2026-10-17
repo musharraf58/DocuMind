@@ -1,10 +1,16 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Text, UniqueConstraint, func
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
+
+# Size of the chunks.embedding column. A pgvector column holds vectors of
+# exactly one size, so this is fixed by migration 0005 and must equal the
+# EMBEDDING_DIMENSIONS setting (checked in get_embedding_provider).
+EMBEDDING_COLUMN_DIMENSIONS = 1024
 
 
 class Chunk(Base):
@@ -16,6 +22,15 @@ class Chunk(Base):
         # document_id is its first column; a separate document_id index would
         # be redundant.
         UniqueConstraint("document_id", "chunk_index", name="uq_chunks_document_index"),
+        # Approximate nearest-neighbour index for cosine distance. The operator
+        # class must match the operator queries use: vector_cosine_ops serves
+        # "<=>" only; an "<->" (L2) query would ignore this index.
+        Index(
+            "ix_chunks_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -35,4 +50,12 @@ class Chunk(Base):
     page_number: Mapped[int | None] = mapped_column(Integer, default=None)
     section_title: Mapped[str | None] = mapped_column(Text, default=None)
     token_count: Mapped[int] = mapped_column(Integer)
+    # NULL for chunks made before embeddings existed (Phase 3); they are left
+    # out of search until their document is processed again.
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(EMBEDDING_COLUMN_DIMENSIONS), default=None
+    )
+    # Which model made the vector. Vectors from different models live in
+    # different spaces, so search only compares vectors from the current model.
+    embedding_model: Mapped[str | None] = mapped_column(Text, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

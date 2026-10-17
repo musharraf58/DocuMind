@@ -1,6 +1,7 @@
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
+import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
@@ -92,3 +93,20 @@ def storage_dir(tmp_path, monkeypatch) -> Path:
     root = tmp_path / "storage"
     monkeypatch.setattr(get_settings(), "STORAGE_PATH", str(root))
     return root
+
+
+@pytest.fixture(autouse=True)
+def fake_embeddings(monkeypatch) -> None:
+    """Every test embeds with the fake provider unless it builds its own."""
+    monkeypatch.setattr(get_settings(), "EMBEDDING_PROVIDER", "fake")
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch) -> None:
+    """Fail loudly if anything tries a real HTTP request. (The test client
+    talks to the app in-process via ASGITransport, which is unaffected.)"""
+
+    async def refuse(self, request):
+        raise RuntimeError(f"Tests must not make network calls (tried {request.url.host})")
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", refuse)

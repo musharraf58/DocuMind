@@ -2,8 +2,8 @@
 
 RAG knowledge base API. FastAPI (async), PostgreSQL + pgvector, SQLAlchemy 2.0 async, Redis.
 
-**Status:** Phase 3 (users, JWT auth, per-user collections, document upload and storage,
-text extraction and chunking).
+**Status:** Phase 4 (users, JWT auth, per-user collections, document upload and storage,
+text extraction and chunking, embeddings and vector search).
 
 ## Prerequisites
 
@@ -16,6 +16,7 @@ uv installs Python 3.12 for you if it's missing.
 
 ```bash
 cp .env.example .env          # then set SECRET_KEY (32+ random chars, see comment inside)
+                              # and pick an embedding provider (see "Embeddings" below)
 uv sync                       # create .venv and install deps (incl. dev)
 ```
 
@@ -96,11 +97,12 @@ the uploaded filename is kept only as display metadata.
 
 Processing turns an uploaded document into **chunks**: pieces of its text of at most
 `CHUNK_TOKENS` tokens (default 500), each sharing about `CHUNK_OVERLAP_TOKENS` (default 60)
-with the previous one. Chunks are what later phases embed and search.
+with the previous one. Each chunk is then **embedded** (turned into a vector) so it can be
+searched by meaning (see "Embeddings and search" below).
 
 | Method | Path | What it does |
 |---|---|---|
-| POST | `/documents/{id}/process` | Extract and chunk now, and return the document when done |
+| POST | `/documents/{id}/process` | Extract, chunk and embed now, and return the document when done |
 | GET | `/documents/{id}/chunks` | The chunks, in order. `?limit=&offset=` |
 
 ```bash
@@ -119,11 +121,13 @@ How it works:
    (whitespace normalized, null characters removed, words hyphenated across lines rejoined).
 3. The text is split by paragraph, then line, sentence and word until pieces fit, and the
    pieces are packed into chunks. A chunk never spans two pages or sections.
-4. In a single transaction, the old chunks are deleted, the new ones inserted, and the
-   document marked `ready`.
+4. All chunks are embedded by the embedding provider, in batches. This is a network call,
+   made while no database transaction is open.
+5. In a single transaction, the old chunks are deleted, the new ones inserted with their
+   vectors, and the document marked `ready`.
 
 If anything fails, the document becomes `failed` with a short `error_message` and its
-previous chunks are kept. That's still a `200` response: the request worked, the file
+previous chunks (and their vectors) are kept. That's still a `200` response: the request worked, the file
 didn't. You can process `ready` and `failed` documents again at any time.
 
 Deleting a document or collection deletes its chunks too.
@@ -150,6 +154,59 @@ Known limitations:
   work bounded, and the Phase 5 worker will add a real timeout.
 - tiktoken downloads its vocabulary (a few MB) the first time it runs locally. The Docker
   image includes it at build time.
+
+## Embeddings and search
+
+Each chunk's vector is stored in `chunks.embedding` (pgvector, 1024 dimensions) together
+with `chunks.embedding_model`, the model that made it. An HNSW index (`vector_cosine_ops`)
+makes nearest-neighbour search fast.
+
+Choose the provider with `EMBEDDING_PROVIDER`:
+
+- `fake`: deterministic vectors from a hash of the text, with no network and no key. It's
+  good for local development and is what the tests use. The vectors carry **no meaning**,
+  so search results are effectively random. They're stored under the model name
+  `fake-sha256`, so they're never searched together with real vectors.
+- `voyage` (the default): [Voyage AI](https://docs.voyageai.com/docs/embeddings). Set
+  `EMBEDDING_API_KEY`. Without a key, processing fails with "Embedding API key is not
+  configured".
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `EMBEDDING_PROVIDER` | `voyage` | `voyage` or `fake` |
+| `EMBEDDING_MODEL` | `voyage-4-lite` | Model name sent to the provider |
+| `EMBEDDING_DIMENSIONS` | 1024 | Vector size. Must match the database column (see below) |
+| `EMBEDDING_API_KEY` | (empty) | Provider API key. Never logged or shown in errors |
+| `EMBEDDING_BATCH_SIZE` | 64 | Texts per request (also capped by the provider's own limits) |
+| `EMBEDDING_MAX_RETRIES` | 4 | Retries on rate limits (429), server errors (5xx) and timeouts |
+| `EMBEDDING_TIMEOUT_SECONDS` | 30 | Per-request timeout |
+
+Retries wait about 1s, 2s, 4s and so on (with random jitter, capped at 30s, and longer if
+the provider asks for it). A bad key or invalid input fails at once without retrying.
+
+**Changing the model or dimensions** is a migration, not just a setting. The column
+holds vectors of exactly one size, and vectors from different models can't be compared.
+See the comment in `alembic/versions/0005_chunk_embeddings.py` for the steps.
+
+### Temporary search endpoint
+
+| Method | Path | What it does |
+|---|---|---|
+| POST | `/collections/{id}/search` | The `limit` chunks in your collection closest in meaning to `query` |
+
+Body: `{"query": "...", "limit": 5}`. The query is 1-2000 characters; `limit` is 1-20
+(default 5). Each result has `content`, `distance` (cosine distance: smaller means more
+similar), `document_name`, `page_number` and `section_title`. Collections you don't own
+return `404`. If the embedding provider is unavailable, you get `503`.
+
+```bash
+curl -X POST localhost:8000/collections/$COLLECTION_ID/search -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"query": "how do I run the tests?", "limit": 3}'
+```
+
+This endpoint is temporary; Phase 6 replaces it with the real retrieval service. Search
+only covers chunks embedded with the current `EMBEDDING_MODEL`. Documents processed before
+Phase 4 (no vectors yet), or with a different model, need to be processed again.
 
 ## Migrations
 

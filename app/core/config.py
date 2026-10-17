@@ -1,7 +1,7 @@
 from functools import lru_cache
-from typing import Self
+from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,7 +16,6 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     ANTHROPIC_API_KEY: str = ""
-    EMBEDDING_API_KEY: str = ""
     # Where uploaded files live. In Docker this is a mounted named volume.
     STORAGE_PATH: str = "./storage"
     MAX_UPLOAD_MB: int = 20
@@ -33,6 +32,20 @@ class Settings(BaseSettings):
     # Zip-bomb guard for DOCX (a DOCX file is a ZIP archive).
     MAX_DOCX_UNCOMPRESSED_MB: int = Field(default=100, ge=1)
     MAX_DOCX_ENTRIES: int = Field(default=1000, ge=1)
+
+    # Embeddings. "fake" gives deterministic vectors with no network calls (for
+    # local dev and tests). The default is the real provider on purpose: a
+    # deployment that forgot this setting must fail loudly, not silently store
+    # meaningless vectors.
+    EMBEDDING_PROVIDER: Literal["voyage", "fake"] = "voyage"
+    EMBEDDING_MODEL: str = "voyage-4-lite"
+    # Must match the chunks.embedding column (see migration 0005).
+    EMBEDDING_DIMENSIONS: int = Field(default=1024, ge=1)
+    # SecretStr prints as "**********", so the key can't leak through a log or repr.
+    EMBEDDING_API_KEY: SecretStr = SecretStr("")
+    EMBEDDING_BATCH_SIZE: int = Field(default=64, ge=1)
+    EMBEDDING_MAX_RETRIES: int = Field(default=4, ge=0, le=10)
+    EMBEDDING_TIMEOUT_SECONDS: float = Field(default=30, gt=0)
 
     @model_validator(mode="after")
     def check_overlap(self) -> Self:
