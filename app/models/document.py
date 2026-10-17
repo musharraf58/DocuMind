@@ -49,4 +49,9 @@ class Document(Base):
     processing_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), default=None
     )
+    # Identifies the run that holds the "processing" claim. Every write a run
+    # makes (heartbeat, final save, failure) requires its own id to still be
+    # here, so a run whose claim was taken over can never overwrite the newer
+    # run's work; it notices at its next heartbeat and stops.
+    processing_run_id: Mapped[uuid.UUID | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
