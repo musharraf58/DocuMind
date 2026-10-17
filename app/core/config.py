@@ -13,7 +13,9 @@ QUERY_RESERVE_FRACTION = 0.05
 class Settings(BaseSettings):
     """App configuration. Values come from environment variables, then .env."""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # env_ignore_empty: "NAME=" with nothing after it means "use the default",
+    # rather than an empty string that may not even parse (e.g. as a number).
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_ignore_empty=True)
 
     DATABASE_URL: str
     REDIS_URL: str
@@ -51,12 +53,14 @@ class Settings(BaseSettings):
     EMBEDDING_BATCH_SIZE: int = Field(default=64, ge=1)
     EMBEDDING_TIMEOUT_SECONDS: float = Field(default=30, gt=0)
 
-    # The provider account's real limits, per rolling 60 seconds. We use only
-    # EMBEDDING_RATE_SAFETY of each, because our token counter is only an
-    # approximation of the provider's tokenizer.
+    # The provider account's real limits, per rolling 60 seconds.
     EMBEDDING_TPM_LIMIT: int = Field(default=10_000, ge=1)
     EMBEDDING_RPM_LIMIT: int = Field(default=3, ge=1)
-    EMBEDDING_RATE_SAFETY: float = Field(default=0.8, gt=0, le=1)
+    # Fraction of the TOKEN limit we plan to use. Our tiktoken count can be well
+    # below the provider's own count (different tokenizer, plus the retrieval
+    # prompt the provider adds to each text), so leave plenty of room.
+    # Requests are counted exactly and don't need this (see embedding_request_budget).
+    EMBEDDING_RATE_SAFETY: float = Field(default=0.5, gt=0, le=1)
 
     # Retries per batch (each batch starts with a fresh count).
     EMBEDDING_MAX_RETRIES: int = Field(default=6, ge=0, le=10)
@@ -64,6 +68,9 @@ class Settings(BaseSettings):
     # A Retry-After header from the provider takes precedence when present.
     EMBEDDING_RETRY_BASE_SECONDS: float = Field(default=2, gt=0)
     EMBEDDING_RETRY_MAX_SECONDS: float = Field(default=60, gt=0)
+    # Shortest wait after a 429 ("too many requests"). Unset means 60 /
+    # EMBEDDING_RPM_LIMIT: the spacing at which requests stay under the limit.
+    EMBEDDING_MIN_RETRY_WAIT_SECONDS: float | None = Field(default=None, gt=0)
     # A search query never waits longer than this for embedding capacity; past
     # it the API answers "busy, retry in N seconds" instead of hanging.
     EMBEDDING_QUERY_MAX_WAIT_SECONDS: float = Field(default=20, gt=0)
@@ -75,8 +82,16 @@ class Settings(BaseSettings):
 
     @property
     def embedding_request_budget(self) -> int:
-        """Requests we allow ourselves per 60 seconds (at least 1)."""
-        return max(1, math.floor(self.EMBEDDING_RPM_LIMIT * self.EMBEDDING_RATE_SAFETY + 1e-9))
+        """Requests we allow ourselves per 60 seconds: one below the limit (at
+        least 1). Requests are counted exactly; the one-request margin covers
+        our clock and the provider's not lining up perfectly."""
+        return max(1, self.EMBEDDING_RPM_LIMIT - 1)
+
+    @property
+    def embedding_min_retry_wait(self) -> float:
+        if self.EMBEDDING_MIN_RETRY_WAIT_SECONDS is not None:
+            return self.EMBEDDING_MIN_RETRY_WAIT_SECONDS
+        return 60 / self.EMBEDDING_RPM_LIMIT
 
     @property
     def embedding_query_reserve_tokens(self) -> int:

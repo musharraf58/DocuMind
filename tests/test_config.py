@@ -12,12 +12,31 @@ def make(**overrides) -> Settings:
 
 def test_default_budgets_follow_the_documented_limits():
     settings = make()
-    assert settings.embedding_token_budget == 8000  # 10,000 x 0.8
-    assert settings.embedding_request_budget == 2  # 3 x 0.8 = 2.4, rounded down
-    assert settings.embedding_query_reserve_tokens == 400  # 5%
-    assert settings.embedding_document_token_budget == 7600
+    assert settings.embedding_token_budget == 5000  # 10,000 x 0.5
+    assert settings.embedding_request_budget == 2  # one below the limit of 3
+    assert settings.embedding_query_reserve_tokens == 250  # 5%
+    assert settings.embedding_document_token_budget == 4750
+    assert settings.embedding_min_retry_wait == 20  # 60 s / 3 requests
     assert settings.embedding_query_reserve_requests == 1
     assert settings.EMBEDDING_MAX_RETRIES == 6
+
+
+def test_safety_factor_applies_to_tokens_only():
+    settings = make(EMBEDDING_RATE_SAFETY=0.2, EMBEDDING_RPM_LIMIT=10)
+    assert settings.embedding_token_budget == 2000
+    assert settings.embedding_request_budget == 9  # not 10 x 0.2
+
+
+def test_min_retry_wait_can_be_set_explicitly():
+    assert make(EMBEDDING_MIN_RETRY_WAIT_SECONDS=45).embedding_min_retry_wait == 45
+    assert make(EMBEDDING_RPM_LIMIT=60).embedding_min_retry_wait == 1
+
+
+def test_empty_min_retry_wait_in_env_file_means_computed(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("EMBEDDING_MIN_RETRY_WAIT_SECONDS=\n")
+    settings = Settings(_env_file=env, **BASE)
+    assert settings.embedding_min_retry_wait == 20
 
 
 def test_request_budget_is_never_below_one():
@@ -32,7 +51,7 @@ def test_chunk_larger_than_a_batch_is_refused_at_startup():
 
 
 def test_chunk_that_fits_is_accepted():
-    make(EMBEDDING_TPM_LIMIT=1000, CHUNK_TOKENS=500)
+    make(EMBEDDING_TPM_LIMIT=2000, CHUNK_TOKENS=500)  # 2000 x 0.5 - 5% = 950
 
 
 def test_retry_max_below_base_is_refused():

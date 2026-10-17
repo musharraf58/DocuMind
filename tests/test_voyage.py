@@ -223,9 +223,9 @@ def test_factory_selects_provider_from_settings(monkeypatch):
     assert (provider.model, provider.dimensions, provider.batch_size) == ("voyage-4-lite", 1024, 7)
 
     # Rate limiting and retries come from the settings.
-    assert provider.limiter.token_budget == 8000  # 10,000 x 0.8
-    assert provider.limiter.request_budget == 2  # 3 x 0.8, rounded down
-    assert provider.token_budget == 7600  # minus 5% held back for queries
+    assert provider.limiter.token_budget == 5000  # 10,000 x 0.5
+    assert provider.limiter.request_budget == 2  # one below the limit of 3
+    assert provider.token_budget == 4750  # minus 5% held back for queries
     assert (provider.max_retries, provider.retry_base_seconds) == (6, 2)
     # Every provider object shares the one limiter, or each request would think
     # the whole budget was free.
