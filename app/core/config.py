@@ -83,6 +83,12 @@ class Settings(BaseSettings):
         return math.ceil(self.embedding_token_budget * QUERY_RESERVE_FRACTION)
 
     @property
+    def embedding_query_reserve_requests(self) -> int:
+        """One request slot per window stays free for queries (when there are
+        at least two; with a single slot, documents and queries share it)."""
+        return 1 if self.embedding_request_budget >= 2 else 0
+
+    @property
     def embedding_document_token_budget(self) -> int:
         """Largest batch of document text: the budget minus the queries' share."""
         return self.embedding_token_budget - self.embedding_query_reserve_tokens

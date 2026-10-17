@@ -3,13 +3,8 @@ import logging
 import httpx
 from pydantic import SecretStr
 
-from app.services.embeddings.base import (
-    BatchResult,
-    EmbeddingError,
-    EmbeddingProvider,
-    InputType,
-    RetryableEmbeddingError,
-)
+from app.services.embeddings.base import BatchResult, EmbeddingProvider, InputType
+from app.services.embeddings.errors import EmbeddingError, RetryableEmbeddingError
 
 logger = logging.getLogger(__name__)
 

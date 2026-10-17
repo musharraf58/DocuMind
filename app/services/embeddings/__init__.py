@@ -1,18 +1,21 @@
 from app.core.config import get_settings
 from app.models.chunk import EMBEDDING_COLUMN_DIMENSIONS
-from app.services.embeddings.base import (
+from app.services.embeddings.base import EmbeddingProvider, Vector
+from app.services.embeddings.errors import (
+    EmbeddingBusyError,
     EmbeddingError,
-    EmbeddingProvider,
+    RequestTooLargeError,
     RetryableEmbeddingError,
-    Vector,
 )
 from app.services.embeddings.fake import FakeEmbeddingProvider
 from app.services.embeddings.voyage import VoyageEmbeddingProvider
 
 __all__ = [
+    "EmbeddingBusyError",
     "EmbeddingError",
     "EmbeddingProvider",
     "FakeEmbeddingProvider",
+    "RequestTooLargeError",
     "RetryableEmbeddingError",
     "Vector",
     "VoyageEmbeddingProvider",

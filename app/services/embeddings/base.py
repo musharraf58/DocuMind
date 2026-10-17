@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from app.services.chunking import count_tokens
+from app.services.embeddings.errors import EmbeddingError, RetryableEmbeddingError
 
 logger = logging.getLogger(__name__)
 
@@ -16,21 +17,6 @@ InputType = Literal["document", "query"]
 BACKOFF_BASE_SECONDS = 1.0
 BACKOFF_CAP_SECONDS = 30.0
 MAX_RETRY_AFTER_SECONDS = 60.0
-
-
-class EmbeddingError(Exception):
-    """Embedding failed. The message is stored on documents and shown to users,
-    so it must be short and must never contain the API key or anything the
-    provider sent back."""
-
-
-class RetryableEmbeddingError(EmbeddingError):
-    """A failure that may go away if we wait and try again (rate limit, server
-    error, timeout). retry_after is the provider's own hint, in seconds."""
-
-    def __init__(self, message: str, retry_after: float | None = None) -> None:
-        super().__init__(message)
-        self.retry_after = retry_after
 
 
 @dataclass(frozen=True)

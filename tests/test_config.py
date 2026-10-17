@@ -16,11 +16,14 @@ def test_default_budgets_follow_the_documented_limits():
     assert settings.embedding_request_budget == 2  # 3 x 0.8 = 2.4, rounded down
     assert settings.embedding_query_reserve_tokens == 400  # 5%
     assert settings.embedding_document_token_budget == 7600
+    assert settings.embedding_query_reserve_requests == 1
     assert settings.EMBEDDING_MAX_RETRIES == 6
 
 
 def test_request_budget_is_never_below_one():
-    assert make(EMBEDDING_RPM_LIMIT=1).embedding_request_budget == 1
+    settings = make(EMBEDDING_RPM_LIMIT=1)
+    assert settings.embedding_request_budget == 1
+    assert settings.embedding_query_reserve_requests == 0  # nothing to spare
 
 
 def test_chunk_larger_than_a_batch_is_refused_at_startup():

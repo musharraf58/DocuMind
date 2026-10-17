@@ -1,12 +1,31 @@
 """Embedding providers for tests: scripted failures, recorded calls, and
 vectors with controllable meaning."""
 
+import asyncio
 from collections.abc import Sequence
 
 from app.services.embeddings.base import BatchResult, EmbeddingProvider, InputType
 from app.services.embeddings.fake import FakeEmbeddingProvider, fake_vector
 
 DIMENSIONS = 1024
+
+
+class FakeClock:
+    """A clock that only moves when something sleeps on it, so minutes of
+    waiting take no real time. Pass `clock` and `sleep` to the code under test."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+        self.sleeps: list[float] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        assert seconds >= 0
+        self.sleeps.append(seconds)
+        await asyncio.sleep(0)  # let other tasks run, as a real sleep would
+        self.now += seconds
 
 
 class RecordingSleep:
