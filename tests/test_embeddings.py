@@ -420,10 +420,58 @@ async def test_progress_is_logged_per_batch(caplog):
     progress = [line for line in lines if line.startswith("embedded ")]
     assert len(progress) == 7
     assert progress[0].startswith("embedded 15/96 chunks (batch 1/7: ~7500 tokens estimated")
+    assert "15 reported by the provider" in progress[0]  # ScriptedProvider reports 1 per text
     assert "waited 0.0s" in progress[0]  # the first batch goes straight out
     assert "waited 60.0s" in progress[1]  # later ones wait for the minute to pass
     assert progress[-1].startswith("embedded 96/96 chunks (batch 7/7")
     assert lines[-1].startswith("Embedding finished: 96 chunks, 7 requests")
+    assert "tokens ~48000 estimated" in lines[-1]
+
+
+async def test_estimated_and_actual_tokens_are_compared_per_batch(caplog):
+    caplog.set_level(logging.INFO, logger="app")
+    provider = ScriptedProvider(
+        token_budget=1000,
+        batch_size=2,
+        reported_tokens=lambda batch: 550 * len(batch),  # 10% more than our 500 each
+    )
+    await provider.embed_documents(texts(4), token_counts=[500] * 4)
+    assert "~1000 tokens estimated, 1100 reported by the provider (+10%)" in caplog.text
+    assert "tokens ~2000 estimated, 2200 reported by the provider (+10%)" in caplog.text
+
+
+async def test_warns_when_the_provider_counts_more_than_the_batch_budget(caplog):
+    caplog.set_level(logging.INFO, logger="app")
+    provider = ScriptedProvider(token_budget=1000, reported_tokens=lambda batch: 1300)
+    await provider.embed_documents(texts(2), token_counts=[450, 450])
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "counted 1300 tokens for a batch estimated at 900" in w and "EMBEDDING_RATE_SAFETY" in w
+        for w in warnings
+    )
+
+
+async def test_missing_provider_count_is_said_plainly(caplog):
+    caplog.set_level(logging.INFO, logger="app")
+    provider = ScriptedProvider(token_budget=1000, reported_tokens=lambda batch: 0)
+    await provider.embed_documents(texts(1), token_counts=[100])
+    assert "no count reported by the provider" in caplog.text
+
+
+async def test_provider_count_corrects_the_limiter_and_delays_the_next_batch():
+    clock = FakeClock()
+    counts = {"first": 900, "second": 400}  # what the provider says each used
+    provider = limited_provider(
+        clock,
+        tokens=1000,
+        requests=10,
+        batch_size=1,
+        reported_tokens=lambda batch: sum(counts[t] for t in batch),
+    )
+    await provider.embed_documents(["first", "second"], token_counts=[500, 400])
+    # Estimated 500 + 400 would fit in the minute; the provider's 900 + 400 doesn't.
+    first, second = provider.times
+    assert second - first == pytest.approx(60, abs=0.1)
 
 
 async def test_retry_warnings_are_logged_without_secrets(caplog):

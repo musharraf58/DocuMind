@@ -28,10 +28,26 @@ WINDOW_SECONDS = 60.0
 WAKE_PADDING_SECONDS = 0.01
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Sent:
     at: float
     tokens: int
+
+
+@dataclass
+class Reservation:
+    """A request the limiter has let through and recorded."""
+
+    waited: float
+    _sent: _Sent
+
+    def correct(self, actual_tokens: int) -> None:
+        """The provider reported how many tokens this request really used. If
+        that is more than we estimated, record the real number, so the window
+        reflects what the provider is counting and the next request waits
+        accordingly. Never lowered: a missing (0) or smaller count changes
+        nothing, so the limiter can only become more cautious."""
+        self._sent.tokens = max(self._sent.tokens, actual_tokens)
 
 
 class SlidingWindowRateLimiter:
@@ -89,9 +105,9 @@ class SlidingWindowRateLimiter:
 
     async def acquire(
         self, tokens: int, kind: Kind = "document", max_wait: float | None = None
-    ) -> float:
+    ) -> Reservation:
         """Wait until a request of `tokens` tokens may be sent, record it as sent,
-        and return how long we waited.
+        and return the reservation (with how long we waited).
 
         Raises RequestTooLargeError at once if it could never fit, and
         EmbeddingBusyError (without recording anything) if it would have to
@@ -114,8 +130,9 @@ class SlidingWindowRateLimiter:
             now = self._clock()
             wait = self._wait_needed(now, tokens, token_cap, request_cap)
             if wait <= 0:
-                self._sent.append(_Sent(now, tokens))
-                return waited
+                sent = _Sent(now, tokens)
+                self._sent.append(sent)
+                return Reservation(waited, sent)
             if max_wait is not None and waited + wait > max_wait:
                 raise EmbeddingBusyError(retry_after=wait)
             await self._sleep(wait + WAKE_PADDING_SECONDS)

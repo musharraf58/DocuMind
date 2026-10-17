@@ -47,6 +47,7 @@ class ScriptedProvider(EmbeddingProvider):
         self,
         failures: Sequence[Exception] = (),
         now: Callable[[], float] | None = None,
+        reported_tokens: Callable[[list[str]], int] | None = None,
         **kwargs,
     ) -> None:
         kwargs.setdefault("model", "test-model")
@@ -56,6 +57,8 @@ class ScriptedProvider(EmbeddingProvider):
         self.failures = list(failures)
         self.calls: list[tuple[list[str], InputType]] = []
         self._now = now
+        # How many tokens the "provider" says a request used (default: 1 per text).
+        self._reported_tokens = reported_tokens or len
         self.times: list[float] = []  # when each request was sent (if a clock was given)
 
     async def _embed_batch(self, texts: list[str], input_type: InputType) -> BatchResult:
@@ -64,7 +67,8 @@ class ScriptedProvider(EmbeddingProvider):
             self.times.append(self._now())
         if self.failures:
             raise self.failures.pop(0)
-        return BatchResult([fake_vector(t, self.dimensions) for t in texts], len(texts))
+        vectors = [fake_vector(t, self.dimensions) for t in texts]
+        return BatchResult(vectors, self._reported_tokens(texts))
 
 
 def limited_provider(

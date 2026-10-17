@@ -28,8 +28,8 @@ def make(clock: FakeClock, tokens=8000, requests=2, reserve_tokens=0, reserve_re
 async def test_requests_within_budget_go_through_without_waiting():
     clock = FakeClock()
     limiter = make(clock)
-    assert await limiter.acquire(3000) == 0
-    assert await limiter.acquire(3000) == 0
+    assert (await limiter.acquire(3000)).waited == 0
+    assert (await limiter.acquire(3000)).waited == 0
     assert clock.sleeps == []
     assert limiter.usage() == (2, 6000)
 
@@ -42,7 +42,7 @@ async def test_request_budget_makes_the_third_request_wait_for_the_first_to_expi
     clock.now += 5
     await limiter.acquire(10)
 
-    waited = await limiter.acquire(10)  # must wait until the first leaves (t = 60)
+    waited = (await limiter.acquire(10)).waited  # must wait until the first leaves (t = 60)
     assert clock.now == pytest.approx(start + 60 + PAD)
     assert waited == pytest.approx(55 + PAD)
     assert limiter.usage() == (2, 20)
@@ -81,7 +81,7 @@ async def test_documents_leave_room_for_queries():
 
     await limiter.acquire(7600)  # a full document batch
     # The second request slot and the last 400 tokens belong to queries.
-    assert await limiter.acquire(50, kind="query") == 0
+    assert (await limiter.acquire(50, kind="query")).waited == 0
     assert clock.sleeps == []
 
     start = clock.now
@@ -102,7 +102,7 @@ async def test_query_waits_when_the_wait_is_short_enough():
     await limiter.acquire(10)
     clock.now += 45  # the slot frees up in 15 s
 
-    waited = await limiter.acquire(10, kind="query", max_wait=20)
+    waited = (await limiter.acquire(10, kind="query", max_wait=20)).waited
     assert waited == pytest.approx(15 + PAD)
 
 
@@ -196,8 +196,29 @@ async def test_time_until_available_matches_acquire_and_reserves_nothing():
 
     assert limiter.time_until_available(10) == pytest.approx(45)
     assert limiter.usage() == (1, 10)  # only looked
-    waited = await limiter.acquire(10)
+    waited = (await limiter.acquire(10)).waited
     assert waited == pytest.approx(45 + PAD)
+
+
+async def test_correcting_a_reservation_raises_but_never_lowers_its_tokens():
+    clock = FakeClock()
+    limiter = make(clock, tokens=1000, requests=10)
+    reservation = await limiter.acquire(400)
+    reservation.correct(700)  # the provider counted more than we estimated
+    assert limiter.usage() == (1, 700)
+    reservation.correct(0)  # no count reported
+    reservation.correct(500)  # or a smaller one
+    assert limiter.usage() == (1, 700)
+
+
+async def test_corrected_count_makes_the_next_request_wait():
+    clock = FakeClock()
+    limiter = make(clock, tokens=1000, requests=10)
+    (await limiter.acquire(500)).correct(900)
+    # By our estimate 500 + 400 would fit; by the provider's count it doesn't.
+    start = clock.now
+    await limiter.acquire(400)
+    assert clock.now - start == pytest.approx(60 + PAD)
 
 
 def test_estimate_seconds():

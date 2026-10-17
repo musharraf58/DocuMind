@@ -119,23 +119,34 @@ class EmbeddingProvider(ABC):
             reported_total += result.total_tokens
             waited_total += waited
             logger.info(
-                "embedded %d/%d chunks (batch %d/%d: ~%d tokens estimated, %d reported by "
-                "the provider, waited %.1fs)",
+                "embedded %d/%d chunks (batch %d/%d: ~%d tokens estimated, %s, waited %.1fs)",
                 len(vectors),
                 len(texts),
                 number,
                 len(batches),
                 estimated,
-                result.total_tokens,
+                _compare(estimated, result.total_tokens),
                 waited,
             )
+            if self.token_budget and result.total_tokens > self.token_budget:
+                # We planned this batch to fit the budget, but by the provider's
+                # count it didn't: our estimate undercounts by more than the
+                # safety factor allows for.
+                logger.warning(
+                    "The provider counted %d tokens for a batch estimated at %d, more than "
+                    "the %d-token batch budget; consider lowering EMBEDDING_RATE_SAFETY",
+                    result.total_tokens,
+                    estimated,
+                    self.token_budget,
+                )
         logger.info(
-            "Embedding finished: %d chunks, %d requests, %d tokens reported, waited %.0fs "
-            "(model %s)",
+            "Embedding finished: %d chunks, %d requests, waited %.0fs; tokens ~%d estimated, "
+            "%s (model %s)",
             len(texts),
             len(batches),
-            reported_total,
             waited_total,
+            sum(tokens for _, tokens in batches),
+            _compare(sum(tokens for _, tokens in batches), reported_total),
             self.model,
         )
         return vectors
@@ -221,12 +232,14 @@ class EmbeddingProvider(ABC):
         """
         attempt = 0
         waited = 0.0
+        reservation = None
         while True:
             if heartbeat is not None:
                 await heartbeat()
             if self.limiter is not None:
                 remaining = None if max_wait is None else max(0.0, max_wait - waited)
-                waited += await self.limiter.acquire(estimated_tokens, kind, max_wait=remaining)
+                reservation = await self.limiter.acquire(estimated_tokens, kind, max_wait=remaining)
+                waited += reservation.waited
             try:
                 result = await self._embed_batch(texts, input_type)
                 break
@@ -261,6 +274,8 @@ class EmbeddingProvider(ABC):
                     raise EmbeddingBusyError(retry_after=delay) from exc
                 await self._sleep(delay)
                 waited += delay
+        if reservation is not None:
+            reservation.correct(result.total_tokens)
         self._check_vectors(result.vectors, len(texts))
         return result, waited
 
@@ -300,6 +315,13 @@ class EmbeddingProvider(ABC):
                 f"Embedding service returned vectors of the wrong size "
                 f"(expected {self.dimensions} dimensions)"
             )
+
+
+def _compare(estimated: int, reported: int) -> str:
+    """'7391 reported by the provider (+12%)', for tuning EMBEDDING_RATE_SAFETY."""
+    if reported <= 0 or estimated <= 0:
+        return "no count reported by the provider"
+    return f"{reported} reported by the provider ({(reported - estimated) / estimated:+.0%})"
 
 
 def _reject_blank(texts: Sequence[str]) -> None:
