@@ -183,10 +183,11 @@ Choose the provider with `EMBEDDING_PROVIDER`:
 | `EMBEDDING_TIMEOUT_SECONDS` | 30 | Per-request timeout |
 | `EMBEDDING_TPM_LIMIT` | 10000 | Your account's tokens per minute |
 | `EMBEDDING_RPM_LIMIT` | 3 | Your account's requests per minute |
-| `EMBEDDING_RATE_SAFETY` | 0.8 | Fraction of each limit we actually use (our token count is only an approximation of the provider's) |
+| `EMBEDDING_RATE_SAFETY` | 0.5 | Fraction of the token limit we plan to use (our tiktoken count can be well below the provider's) |
 | `EMBEDDING_MAX_RETRIES` | 6 | Retries per batch on rate limits (429), server errors (5xx) and timeouts |
 | `EMBEDDING_RETRY_BASE_SECONDS` | 2 | First retry wait; doubles each time |
 | `EMBEDDING_RETRY_MAX_SECONDS` | 60 | Longest backoff wait |
+| `EMBEDDING_MIN_RETRY_WAIT_SECONDS` | 60 / RPM limit | Shortest wait after a 429 (20 s at 3 requests per minute) |
 | `EMBEDDING_QUERY_MAX_WAIT_SECONDS` | 20 | Longest a search waits for embedding capacity |
 
 A bad key or invalid input fails at once without retrying.
@@ -196,31 +197,50 @@ A bad key or invalid input fails at once without retrying.
 Embedding providers cap tokens and requests per minute. DocuMind stays under your limits
 instead of finding them out from errors:
 
-- **Budgets.** With the defaults it uses at most 8,000 tokens (10,000 x 0.8) and 2 requests
-  (3 x 0.8, rounded down) in any rolling 60 seconds. A sliding-window limiter keeps a log of
-  what was sent in the last minute and, before every request (retries included), waits until
-  both budgets have room.
+- **Budgets.** With the defaults it uses at most 5,000 tokens (10,000 x 0.5) and 2 requests
+  (one below the limit of 3) in any rolling 60 seconds. The safety factor applies to tokens
+  only: our tiktoken count can undercount the provider's (a different tokenizer, plus the
+  retrieval prompt it adds to every text), while requests are counted exactly. A
+  sliding-window limiter keeps a log of what was sent in the last minute and, before every
+  attempt, including retries and failed ones, waits until both budgets have room.
 - **Batches are sized by tokens.** A batch ends when the next chunk would push it over the
   token budget (or `EMBEDDING_BATCH_SIZE`). One request bigger than the per-minute allowance
   could never succeed, however often it was retried, which is why batches are kept below it.
-- **Room for searches.** Document batches use at most 95% of the token budget (7,600 tokens)
+- **Room for searches.** Document batches use at most 95% of the token budget (4,750 tokens)
   and leave one request per minute free, so searches can still run during a long embedding.
-- **429 responses.** If the provider still answers 429, its `Retry-After` is honoured (every
-  caller is held until then); without it, retries back off exponentially with jitter.
-  A `Retry-After` over two minutes fails the document with "retry in about N seconds".
-- **Startup check.** `CHUNK_TOKENS` must fit in one batch (7,600 tokens with the defaults).
+- **429 responses.** Retrying within seconds only uses up more of the per-minute allowance,
+  so after a 429 the wait is at least `Retry-After` (when sent) and at least
+  `EMBEDDING_MIN_RETRY_WAIT_SECONDS`, doubling on each further 429 up to
+  `EMBEDDING_RETRY_MAX_SECONDS`, with 0-25% random extra on top. Every caller is held until
+  then. Server errors and timeouts get a short backoff instead. A `Retry-After` over two
+  minutes fails the document with "retry in about N seconds".
+- **Learning the real count.** The provider reports how many tokens each request used. The
+  limiter records that number when it's higher than our estimate, and the log compares the
+  two for every batch, for example `7391 reported by the provider (+12%)`, with a warning
+  when a batch went over its budget by the provider's count. Use it to tune
+  `EMBEDDING_RATE_SAFETY`.
+- **Startup check.** `CHUNK_TOKENS` must fit in one batch (4,750 tokens with the defaults).
 
-What this means in practice: with the defaults, embedding goes at about **one 7,600-token
-batch per minute**. A document of 96 chunks (about 48,000 tokens) takes roughly 6 minutes;
-a 500-page PDF can take half an hour. Progress is logged at INFO level, for example
-`embedded 45/96 chunks (batch 3/7: ~7500 tokens estimated, 7391 reported by the provider,
-waited 60.0s)`. Higher plan limits mean faster runs: raise `EMBEDDING_TPM_LIMIT` and
-`EMBEDDING_RPM_LIMIT`.
+What this means in practice: with the defaults, embedding goes at about **one 4,750-token
+batch per minute**. A document of 33 chunks (about 12,000 tokens) takes about 2 minutes, one
+of 96 chunks (about 48,000 tokens) roughly 10, and a 500-page PDF can take an hour. Progress
+is logged at INFO level with timestamps, for example `embedded 18/96 chunks (batch 2/11:
+~4500 tokens estimated, 5040 reported by the provider (+12%), waited 60.0s)`. Retries log
+the real wait, including time spent waiting for the rate-limit window, and every failed
+request logs its HTTP status and `Retry-After` header. Higher plan limits mean faster
+runs: raise `EMBEDDING_TPM_LIMIT` and `EMBEDDING_RPM_LIMIT`.
 
 `POST /documents/{id}/process` stays open for the whole run. Long runs are fine for the
 server (the document's `processing` claim is refreshed with every attempt, and nothing else
 is held), but a browser or proxy may give up on a request that lasts minutes. Phase 5's
 background queue fixes that.
+
+**One run per document.** Calling `process` again while a run is going returns `409`. A run
+counts as abandoned only if it hasn't refreshed its claim for 10 minutes, and then another
+call may take over. Each claim carries a run id, and every write a run makes needs that id
+to still be on the document. So a run that was taken over stops before its next request to
+the provider (its own call gets `409 Processing was taken over by another run`), and it
+never writes chunks or marks the document failed.
 
 **Searches never hang.** A search waits at most `EMBEDDING_QUERY_MAX_WAIT_SECONDS` for
 embedding capacity. If it would have to wait longer, it answers `503` with a `Retry-After`
