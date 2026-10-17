@@ -2,12 +2,16 @@ import asyncio
 import logging
 import random
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 from app.services.chunking import count_tokens
-from app.services.embeddings.errors import EmbeddingError, RetryableEmbeddingError
+from app.services.embeddings.errors import (
+    EmbeddingError,
+    RequestTooLargeError,
+    RetryableEmbeddingError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,19 +49,31 @@ class EmbeddingProvider(ABC):
         batch_size: int = 64,
         max_retries: int = 4,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        token_budget: int | None = None,
     ) -> None:
         self.model = model
         self.dimensions = dimensions
         self.batch_size = min(batch_size, self.max_batch_texts)
         self.max_retries = max_retries
         self._sleep = sleep  # replaceable so tests don't actually wait
+        # Most tokens we put in one request. Our tokenizer only approximates the
+        # provider's, so the provider's own cap counts at half.
+        caps = [token_budget, self.max_batch_tokens // 2 if self.max_batch_tokens else None]
+        self.token_budget = min((cap for cap in caps if cap), default=None)
 
-    async def embed_documents(self, texts: Sequence[str]) -> list[Vector]:
-        """Embed texts for storage, returning one vector per text, in order."""
+    async def embed_documents(
+        self, texts: Sequence[str], token_counts: Sequence[int] | None = None
+    ) -> list[Vector]:
+        """Embed texts for storage, returning one vector per text, in order.
+
+        token_counts: how many tokens each text has, if the caller already knows
+        (counting again is wasted CPU, and this runs on the event loop).
+        """
         _reject_blank(texts)
+        batches = self._plan_batches(texts, token_counts)  # fails before any request is sent
         vectors: list[Vector] = []
         total_tokens = requests = 0
-        for batch in self._batches(texts):
+        for batch, _estimated_tokens in batches:
             result = await self._embed_with_retry(batch, "document")
             vectors.extend(result.vectors)
             total_tokens += result.total_tokens
@@ -83,23 +99,47 @@ class EmbeddingProvider(ABC):
         """Send ONE request. Raise RetryableEmbeddingError for failures worth
         retrying and EmbeddingError for everything else."""
 
-    def _batches(self, texts: Sequence[str]) -> Iterator[list[str]]:
-        """Group texts so each request stays within the batch size and the
-        provider's token limit. Our tokenizer differs from the provider's, so
-        we use only half the token limit as a safety margin."""
-        token_budget = self.max_batch_tokens // 2 if self.max_batch_tokens else None
+    def _plan_batches(
+        self, texts: Sequence[str], token_counts: Sequence[int] | None
+    ) -> list[tuple[list[str], int]]:
+        """Group texts into requests of (texts, estimated tokens).
+
+        A batch ends when adding the next text would push it over the token
+        budget or the batch size. A text that alone exceeds the token budget can
+        never be sent, however often we retry, so it is refused up front,
+        before any quota is spent on the texts ahead of it.
+        """
+        if token_counts is not None and len(token_counts) != len(texts):
+            raise ValueError("token_counts must have one entry per text")
+        budget = self.token_budget
+        if budget is None:
+            counts = [0] * len(texts)  # no token limit to respect: don't bother counting
+        else:
+            if token_counts is None:
+                counts = [count_tokens(text) for text in texts]
+            else:
+                counts = list(token_counts)
+            largest = max(counts, default=0)
+            if largest > budget:
+                raise RequestTooLargeError(
+                    f"A chunk is too large to embed ({largest} tokens; at most {budget} "
+                    "per request). Try a smaller CHUNK_TOKENS."
+                )
+
+        batches: list[tuple[list[str], int]] = []
         batch: list[str] = []
         batch_tokens = 0
-        for text in texts:
-            tokens = count_tokens(text) if token_budget else 0
-            too_many_tokens = token_budget is not None and batch_tokens + tokens > token_budget
-            if batch and (len(batch) == self.batch_size or too_many_tokens):
-                yield batch
+        for text, tokens in zip(texts, counts, strict=True):
+            full = len(batch) == self.batch_size
+            over_budget = budget is not None and batch_tokens + tokens > budget
+            if batch and (full or over_budget):
+                batches.append((batch, batch_tokens))
                 batch, batch_tokens = [], 0
             batch.append(text)
             batch_tokens += tokens
         if batch:
-            yield batch
+            batches.append((batch, batch_tokens))
+        return batches
 
     async def _embed_with_retry(self, texts: list[str], input_type: InputType) -> BatchResult:
         attempt = 0
