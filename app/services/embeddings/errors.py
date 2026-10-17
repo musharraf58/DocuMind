@@ -11,9 +11,14 @@ class RetryableEmbeddingError(EmbeddingError):
     """A failure that may go away if we wait and try again (rate limit, server
     error, timeout). retry_after is the provider's own hint, in seconds."""
 
-    def __init__(self, message: str, retry_after: float | None = None) -> None:
+    def __init__(
+        self, message: str, retry_after: float | None = None, rate_limited: bool = False
+    ) -> None:
         super().__init__(message)
         self.retry_after = retry_after
+        # True for "you're sending too fast" (HTTP 429), as opposed to a fault on
+        # the provider's side. Only the former says anything about our quota.
+        self.rate_limited = rate_limited
 
 
 class EmbeddingBusyError(EmbeddingError):

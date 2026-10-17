@@ -4,13 +4,14 @@ import random
 import pytest
 
 from app.services.embeddings import (
+    EmbeddingBusyError,
     EmbeddingError,
     FakeEmbeddingProvider,
     RequestTooLargeError,
     RetryableEmbeddingError,
 )
 from app.services.embeddings.base import BatchResult
-from tests.embedding_fakes import DIMENSIONS, ScriptedProvider
+from tests.embedding_fakes import DIMENSIONS, FakeClock, ScriptedProvider, limited_provider
 
 
 def texts(n: int) -> list[str]:
@@ -175,8 +176,8 @@ async def test_retry_succeeds_after_two_retryable_failures():
     assert len(provider.calls) == 3
     delays = provider._sleep.delays
     assert len(delays) == 2
-    assert 0.5 <= delays[0] <= 1.0  # ~1s with jitter
-    assert 1.0 <= delays[1] <= 2.0  # ~2s with jitter
+    assert 1.0 <= delays[0] <= 2.0  # base 2 s, scaled by jitter to 50-100%
+    assert 2.0 <= delays[1] <= 4.0  # doubled
 
 
 async def test_gives_up_after_max_retries():
@@ -202,9 +203,142 @@ async def test_retry_after_hint_is_respected():
     assert provider._sleep.delays == [7]
 
 
-async def test_backoff_is_capped():
-    delays = [ScriptedProvider._backoff(attempt, None) for attempt in range(20)]
-    assert max(delays) <= 30
+async def test_backoff_grows_exponentially_with_jitter_and_is_capped():
+    provider = ScriptedProvider(retry_base_seconds=2, retry_max_seconds=10)
+    for _ in range(50):  # jitter is random, so look at many draws
+        assert 1 <= provider._retry_delay(0, None) <= 2
+        assert 2 <= provider._retry_delay(1, None) <= 4
+        assert 4 <= provider._retry_delay(2, None) <= 8
+        assert 5 <= provider._retry_delay(3, None) <= 10  # 16 would exceed the cap of 10
+        assert 5 <= provider._retry_delay(30, None) <= 10
+    assert len({provider._retry_delay(0, None) for _ in range(50)}) > 1  # really random
+
+
+async def test_retry_after_beyond_ceiling_fails_with_a_retry_time():
+    provider = ScriptedProvider(failures=[RetryableEmbeddingError("429", retry_after=300)])
+    with pytest.raises(EmbeddingBusyError, match="retry in about 300 seconds"):
+        await provider.embed_documents(texts(1))
+    assert provider._sleep.delays == []
+
+
+async def test_each_batch_gets_its_own_retries():
+    # Three failures in each of two batches: more than 3 retries in total, but
+    # never more than 3 for any one batch.
+    failure = RetryableEmbeddingError("503")
+    provider = ScriptedProvider(batch_size=1, max_retries=3)
+    provider.failures = [failure] * 3
+    await provider.embed_documents(texts(1))
+    provider.failures = [failure] * 3
+    await provider.embed_documents(texts(1))
+    assert len(provider.calls) == 8
+
+
+# --- Rate limiting ---
+
+
+def window_ok(times, token_counts, token_budget, request_budget):
+    sent = list(zip(times, token_counts, strict=True))
+    for at, _ in sent:
+        in_window = [tokens for t, tokens in sent if at - 60 < t <= at]
+        assert len(in_window) <= request_budget
+        assert sum(in_window) <= token_budget
+
+
+async def test_a_long_run_is_spread_over_minutes_without_exceeding_the_limits():
+    # 96 chunks of 500 tokens = 48,000 tokens against 8,000 per minute.
+    clock = FakeClock()
+    provider = limited_provider(
+        clock, tokens=8000, requests=2, reserve_tokens=400, reserve_requests=1
+    )
+    start = clock.now
+    vectors = await provider.embed_documents(texts(96), token_counts=[500] * 96)
+
+    assert len(vectors) == 96
+    batch_tokens = [len(batch) * 500 for batch, _ in provider.calls]
+    assert max(batch_tokens) <= 7600  # the document share of the budget
+    assert len(provider.calls) == 7  # 15 chunks each, then 6
+    window_ok(provider.times, batch_tokens, 8000, 2)
+    # One batch per minute: six waits of a minute between the seven requests.
+    assert clock.now - start == pytest.approx(6 * 60, abs=1)
+
+
+async def test_every_attempt_counts_against_the_limit_including_retries():
+    clock = FakeClock()
+    provider = limited_provider(
+        clock,
+        requests=2,
+        failures=[RetryableEmbeddingError("503"), RetryableEmbeddingError("503")],
+    )
+    start = clock.now
+    await provider.embed_documents(texts(1), token_counts=[10])
+
+    assert len(provider.times) == 3
+    # Two requests per minute: the third attempt had to wait for the first to expire.
+    assert provider.times[2] >= start + 60
+    window_ok(provider.times, [10] * 3, 8000, 2)
+
+
+async def test_retry_after_on_429_is_honoured_through_the_limiter():
+    clock = FakeClock()
+    provider = limited_provider(
+        clock, failures=[RetryableEmbeddingError("429", retry_after=30, rate_limited=True)]
+    )
+    await provider.embed_documents(texts(1), token_counts=[10])
+    first, second = provider.times
+    assert second - first >= 30
+    assert second - first < 31  # and it didn't wait on top of that
+
+
+async def test_429_without_retry_after_uses_backoff_and_holds_the_limiter():
+    clock = FakeClock()
+    provider = limited_provider(
+        clock,
+        requests=10,
+        failures=[RetryableEmbeddingError("429", rate_limited=True)],
+        retry_base_seconds=8,
+        retry_max_seconds=60,
+    )
+    await provider.embed_documents(texts(1), token_counts=[10])
+    first, second = provider.times
+    assert 4 <= second - first <= 8.1  # base 8 s, jittered to 50-100%
+
+
+async def test_a_429_holds_other_callers_too():
+    clock = FakeClock()
+    provider = limited_provider(
+        clock,
+        requests=10,
+        failures=[RetryableEmbeddingError("429", retry_after=40, rate_limited=True)],
+    )
+    await provider.embed_documents(texts(1), token_counts=[10])
+    # The provider said "come back in 40 s": a different caller sharing the
+    # limiter now (at the moment of the 429) would have to wait for that too.
+    first = provider.times[0]
+    assert provider.limiter._blocked_until == pytest.approx(first + 40)
+
+
+async def test_server_errors_do_not_hold_the_limiter():
+    clock = FakeClock()
+    provider = limited_provider(clock, requests=10, failures=[RetryableEmbeddingError("503")])
+    await provider.embed_documents(texts(1), token_counts=[10])
+    assert provider.limiter._blocked_until == 0  # a provider fault says nothing about our quota
+    assert len(provider.times) == 2  # but the retry was still sent, and counted
+
+
+async def test_limiter_budget_caps_the_batch_size():
+    clock = FakeClock()
+    provider = limited_provider(clock, tokens=1000, requests=10, reserve_tokens=100)
+    assert provider.token_budget == 900
+    await provider.embed_documents(texts(4), token_counts=[400] * 4)
+    assert sizes(provider) == [2, 2]
+
+
+async def test_chunk_over_the_limiters_document_share_is_refused():
+    clock = FakeClock()
+    provider = limited_provider(clock, tokens=1000, requests=10, reserve_tokens=100)
+    with pytest.raises(RequestTooLargeError):
+        await provider.embed_documents(texts(1), token_counts=[950])
+    assert provider.calls == []
 
 
 # --- Response checks ---

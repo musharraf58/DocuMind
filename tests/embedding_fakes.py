@@ -2,10 +2,11 @@
 vectors with controllable meaning."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from app.services.embeddings.base import BatchResult, EmbeddingProvider, InputType
 from app.services.embeddings.fake import FakeEmbeddingProvider, fake_vector
+from app.services.embeddings.rate_limit import SlidingWindowRateLimiter
 
 DIMENSIONS = 1024
 
@@ -42,19 +43,49 @@ class ScriptedProvider(EmbeddingProvider):
     """Raises the given exceptions on its first calls, then succeeds.
     Records every request it receives."""
 
-    def __init__(self, failures: Sequence[Exception] = (), **kwargs) -> None:
+    def __init__(
+        self,
+        failures: Sequence[Exception] = (),
+        now: Callable[[], float] | None = None,
+        **kwargs,
+    ) -> None:
         kwargs.setdefault("model", "test-model")
         kwargs.setdefault("dimensions", DIMENSIONS)
         kwargs.setdefault("sleep", RecordingSleep())
         super().__init__(**kwargs)
         self.failures = list(failures)
         self.calls: list[tuple[list[str], InputType]] = []
+        self._now = now
+        self.times: list[float] = []  # when each request was sent (if a clock was given)
 
     async def _embed_batch(self, texts: list[str], input_type: InputType) -> BatchResult:
         self.calls.append((list(texts), input_type))
+        if self._now is not None:
+            self.times.append(self._now())
         if self.failures:
             raise self.failures.pop(0)
         return BatchResult([fake_vector(t, self.dimensions) for t in texts], len(texts))
+
+
+def limited_provider(
+    clock: FakeClock,
+    *,
+    tokens: int = 8000,
+    requests: int = 2,
+    reserve_tokens: int = 0,
+    reserve_requests: int = 0,
+    **kwargs,
+) -> ScriptedProvider:
+    """A provider whose every request goes through a rate limiter running on `clock`."""
+    limiter = SlidingWindowRateLimiter(
+        token_budget=tokens,
+        request_budget=requests,
+        query_reserve_tokens=reserve_tokens,
+        query_reserve_requests=reserve_requests,
+        clock=clock.clock,
+        sleep=clock.sleep,
+    )
+    return ScriptedProvider(limiter=limiter, sleep=clock.sleep, now=clock.clock, **kwargs)
 
 
 class KeywordProvider(FakeEmbeddingProvider):

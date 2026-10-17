@@ -8,19 +8,21 @@ from typing import Literal
 
 from app.services.chunking import count_tokens
 from app.services.embeddings.errors import (
+    EmbeddingBusyError,
     EmbeddingError,
     RequestTooLargeError,
     RetryableEmbeddingError,
 )
+from app.services.embeddings.rate_limit import Kind, SlidingWindowRateLimiter
 
 logger = logging.getLogger(__name__)
 
 Vector = list[float]
 InputType = Literal["document", "query"]
 
-BACKOFF_BASE_SECONDS = 1.0
-BACKOFF_CAP_SECONDS = 30.0
-MAX_RETRY_AFTER_SECONDS = 60.0
+# The longest Retry-After we will sit through. Beyond this the work is failed
+# with a "busy, retry in N seconds" message rather than tying a request up.
+RETRY_AFTER_CEILING_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
@@ -34,8 +36,9 @@ class EmbeddingProvider(ABC):
 
     Subclasses implement _embed_batch (one request). This base class does the
     rest, identically for every provider: refuses blank text, splits work
-    into batches within the provider's limits, retries transient failures
-    with backoff, and checks that every vector has the expected size.
+    into batches within the token budget, waits for the rate limiter before
+    every request, retries transient failures (honouring Retry-After), and
+    checks that every vector has the expected size.
     """
 
     # The provider's own per-request limits. Subclasses override.
@@ -47,18 +50,28 @@ class EmbeddingProvider(ABC):
         model: str,
         dimensions: int,
         batch_size: int = 64,
-        max_retries: int = 4,
+        max_retries: int = 6,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         token_budget: int | None = None,
+        limiter: SlidingWindowRateLimiter | None = None,
+        retry_base_seconds: float = 2.0,
+        retry_max_seconds: float = 60.0,
     ) -> None:
         self.model = model
         self.dimensions = dimensions
         self.batch_size = min(batch_size, self.max_batch_texts)
         self.max_retries = max_retries
+        self.limiter = limiter
+        self.retry_base_seconds = retry_base_seconds
+        self.retry_max_seconds = retry_max_seconds
         self._sleep = sleep  # replaceable so tests don't actually wait
         # Most tokens we put in one request. Our tokenizer only approximates the
         # provider's, so the provider's own cap counts at half.
-        caps = [token_budget, self.max_batch_tokens // 2 if self.max_batch_tokens else None]
+        caps = [
+            token_budget,
+            limiter.document_token_budget if limiter else None,
+            self.max_batch_tokens // 2 if self.max_batch_tokens else None,
+        ]
         self.token_budget = min((cap for cap in caps if cap), default=None)
 
     async def embed_documents(
@@ -73,8 +86,8 @@ class EmbeddingProvider(ABC):
         batches = self._plan_batches(texts, token_counts)  # fails before any request is sent
         vectors: list[Vector] = []
         total_tokens = requests = 0
-        for batch, _estimated_tokens in batches:
-            result = await self._embed_with_retry(batch, "document")
+        for batch, estimated_tokens in batches:
+            result, _waited = await self._send(batch, "document", estimated_tokens, "document")
             vectors.extend(result.vectors)
             total_tokens += result.total_tokens
             requests += 1
@@ -91,7 +104,8 @@ class EmbeddingProvider(ABC):
         """Embed a search query. Providers that tell queries and documents apart
         do better when told which is which."""
         _reject_blank([text])
-        [vector] = (await self._embed_with_retry([text], "query")).vectors
+        result, _waited = await self._send([text], "query", count_tokens(text), "query")
+        [vector] = result.vectors
         return vector
 
     @abstractmethod
@@ -141,39 +155,69 @@ class EmbeddingProvider(ABC):
             batches.append((batch, batch_tokens))
         return batches
 
-    async def _embed_with_retry(self, texts: list[str], input_type: InputType) -> BatchResult:
+    async def _send(
+        self,
+        texts: list[str],
+        input_type: InputType,
+        estimated_tokens: int,
+        kind: Kind,
+        max_wait: float | None = None,
+    ) -> tuple[BatchResult, float]:
+        """Send one batch: wait for the rate limiter, send, retry on transient
+        failures. Returns the result and the seconds spent waiting.
+
+        Every attempt, including retries, goes through the limiter, because
+        the provider counts a failed request against the quota too.
+        max_wait bounds the total waiting; past it EmbeddingBusyError is raised.
+        """
         attempt = 0
+        waited = 0.0
         while True:
+            if self.limiter is not None:
+                remaining = None if max_wait is None else max(0.0, max_wait - waited)
+                waited += await self.limiter.acquire(estimated_tokens, kind, max_wait=remaining)
             try:
                 result = await self._embed_batch(texts, input_type)
                 break
             except RetryableEmbeddingError as exc:
                 if attempt >= self.max_retries:
                     raise
-                delay = self._backoff(attempt, exc.retry_after)
+                delay = self._retry_delay(attempt, exc.retry_after)
+                attempt += 1
                 logger.warning(
                     "Embedding request failed (%s); retry %d/%d in %.1fs",
                     exc,
-                    attempt + 1,
+                    attempt,
                     self.max_retries,
                     delay,
                 )
+                if exc.rate_limited and self.limiter is not None:
+                    # Hold every caller, not just this one, until the provider is
+                    # ready again; the next acquire() does the actual waiting.
+                    self.limiter.penalize(delay)
+                    continue
+                if max_wait is not None and waited + delay > max_wait:
+                    raise EmbeddingBusyError(retry_after=delay) from exc
                 await self._sleep(delay)
-                attempt += 1
+                waited += delay
         self._check_vectors(result.vectors, len(texts))
-        return result
+        return result, waited
 
-    @staticmethod
-    def _backoff(attempt: int, retry_after: float | None) -> float:
-        """Exponential backoff with jitter: about 1s, 2s, 4s, ... capped at 30s,
-        each scaled by a random 50-100% so that many clients failing at once
-        don't all retry at the same instant. A provider's Retry-After wins if
-        it asks for longer."""
-        delay = min(BACKOFF_CAP_SECONDS, BACKOFF_BASE_SECONDS * 2**attempt)
-        delay *= random.uniform(0.5, 1.0)
+    def _retry_delay(self, attempt: int, retry_after: float | None) -> float:
+        """How long to wait before retry number attempt+1.
+
+        The provider's Retry-After, when it sent one, is its explicit
+        instruction and is used as is. Otherwise: exponential backoff
+        (base, 2x base, 4x base, ... up to the cap), each scaled by a random
+        50-100% ("jitter") so many clients that failed together don't all
+        retry at the same instant.
+        """
         if retry_after is not None:
-            delay = max(delay, min(retry_after, MAX_RETRY_AFTER_SECONDS))
-        return delay
+            if retry_after > RETRY_AFTER_CEILING_SECONDS:
+                raise EmbeddingBusyError(retry_after=retry_after)
+            return retry_after
+        delay = min(self.retry_max_seconds, self.retry_base_seconds * 2**attempt)
+        return delay * random.uniform(0.5, 1.0)
 
     def _check_vectors(self, vectors: list[Vector], expected_count: int) -> None:
         if len(vectors) != expected_count:

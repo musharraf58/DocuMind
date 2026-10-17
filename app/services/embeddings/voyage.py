@@ -79,7 +79,11 @@ class VoyageEmbeddingProvider(EmbeddingProvider):
             logger.warning("Voyage embeddings request failed with HTTP %d", response.status_code)
             message = MESSAGES.get(response.status_code, UNAVAILABLE)
             if response.status_code in RETRYABLE_STATUSES:
-                raise RetryableEmbeddingError(message, _retry_after(response))
+                raise RetryableEmbeddingError(
+                    message,
+                    _retry_after(response),
+                    rate_limited=response.status_code == 429,
+                )
             if response.status_code not in MESSAGES:
                 message = f"Embedding request failed (HTTP {response.status_code})"
             raise EmbeddingError(message)
@@ -96,6 +100,7 @@ class VoyageEmbeddingProvider(EmbeddingProvider):
 
 def _retry_after(response: httpx.Response) -> float | None:
     try:
-        return float(response.headers["Retry-After"])
+        seconds = float(response.headers["Retry-After"])
     except (KeyError, ValueError):
         return None  # missing, or an HTTP date (rare); fall back to our backoff
+    return seconds if seconds >= 0 else None
