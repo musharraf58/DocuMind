@@ -56,6 +56,7 @@ class EmbeddingProvider(ABC):
         limiter: SlidingWindowRateLimiter | None = None,
         retry_base_seconds: float = 2.0,
         retry_max_seconds: float = 60.0,
+        query_max_wait: float | None = 20.0,
     ) -> None:
         self.model = model
         self.dimensions = dimensions
@@ -64,6 +65,7 @@ class EmbeddingProvider(ABC):
         self.limiter = limiter
         self.retry_base_seconds = retry_base_seconds
         self.retry_max_seconds = retry_max_seconds
+        self.query_max_wait = query_max_wait
         self._sleep = sleep  # replaceable so tests don't actually wait
         # Most tokens we put in one request. Our tokenizer only approximates the
         # provider's, so the provider's own cap counts at half.
@@ -102,9 +104,17 @@ class EmbeddingProvider(ABC):
 
     async def embed_query(self, text: str) -> Vector:
         """Embed a search query. Providers that tell queries and documents apart
-        do better when told which is which."""
+        do better when told which is which.
+
+        Someone is waiting on the answer, so unlike document embedding this never
+        waits for long: if getting through (rate limiter plus retries) would
+        take longer than query_max_wait seconds in total, it raises
+        EmbeddingBusyError saying when to try again.
+        """
         _reject_blank([text])
-        result, _waited = await self._send([text], "query", count_tokens(text), "query")
+        result, _waited = await self._send(
+            [text], "query", count_tokens(text), "query", max_wait=self.query_max_wait
+        )
         [vector] = result.vectors
         return vector
 

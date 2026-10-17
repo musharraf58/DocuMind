@@ -1,3 +1,4 @@
+import asyncio
 import math
 import random
 
@@ -339,6 +340,89 @@ async def test_chunk_over_the_limiters_document_share_is_refused():
     with pytest.raises(RequestTooLargeError):
         await provider.embed_documents(texts(1), token_counts=[950])
     assert provider.calls == []
+
+
+# --- Queries never wait for long ---
+
+
+async def test_query_waits_a_short_while_for_capacity():
+    clock = FakeClock()
+    provider = limited_provider(clock, requests=1, query_max_wait=20)
+    await provider.embed_documents(texts(1), token_counts=[10])
+    clock.now += 45  # the one request slot frees up in 15 s
+
+    before = clock.now
+    vector = await provider.embed_query("where is it?")
+    assert len(vector) == DIMENSIONS
+    assert clock.now - before == pytest.approx(15, abs=0.1)
+
+
+async def test_query_fails_fast_instead_of_waiting_too_long():
+    clock = FakeClock()
+    provider = limited_provider(clock, requests=1, query_max_wait=20)
+    await provider.embed_documents(texts(1), token_counts=[10])
+    clock.now += 5  # 55 s until a slot frees up
+
+    before = clock.now
+    with pytest.raises(EmbeddingBusyError, match="retry in about 55 seconds") as info:
+        await provider.embed_query("where is it?")
+    assert info.value.retry_after == pytest.approx(55, abs=0.1)
+    assert clock.now == before  # it didn't wait
+    assert len(provider.calls) == 1  # and sent nothing
+
+
+async def test_query_gets_through_while_a_document_uses_its_full_share():
+    clock = FakeClock()
+    provider = limited_provider(
+        clock, tokens=8000, requests=2, reserve_tokens=400, reserve_requests=1, query_max_wait=20
+    )
+    await provider.embed_documents(texts(1), token_counts=[7600])  # the whole document share
+
+    before = clock.now
+    await provider.embed_query("still works")
+    assert clock.now == before  # the reserve kept room, so no waiting at all
+
+
+async def test_query_is_held_up_while_the_provider_says_to_back_off():
+    clock = FakeClock()
+    provider = limited_provider(
+        clock,
+        requests=10,
+        failures=[RetryableEmbeddingError("429", retry_after=40, rate_limited=True)],
+        query_max_wait=20,
+    )
+    document = asyncio.create_task(provider.embed_documents(texts(1), token_counts=[10]))
+    await asyncio.sleep(0)  # the document gets its 429 and starts waiting out the 40 s
+
+    with pytest.raises(EmbeddingBusyError) as info:
+        await provider.embed_query("anyone there?")
+    assert 39 < info.value.retry_after <= 40
+    await document  # and the document itself does finish once the time has passed
+
+
+async def test_query_retries_stop_at_the_deadline():
+    clock = FakeClock()
+    provider = limited_provider(
+        clock,
+        requests=100,
+        failures=[RetryableEmbeddingError("503")] * 5,
+        retry_base_seconds=8,
+        query_max_wait=10,
+    )
+    # First retry waits 4-8 s (fits); the second waits at least 8 s more, which
+    # would pass the 10 s deadline.
+    with pytest.raises(EmbeddingBusyError):
+        await provider.embed_query("flaky")
+    assert len(provider.calls) == 2
+    assert clock.now - 1000.0 <= 10
+
+
+async def test_documents_have_no_deadline():
+    clock = FakeClock()
+    provider = limited_provider(clock, requests=1, query_max_wait=1)
+    await provider.embed_documents(texts(1), token_counts=[10])
+    await provider.embed_documents(texts(1), token_counts=[10])  # waits a full minute: fine
+    assert len(provider.calls) == 2
 
 
 # --- Response checks ---

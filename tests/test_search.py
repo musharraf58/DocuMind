@@ -9,9 +9,9 @@ from app.core.config import get_settings
 from app.main import app
 from app.models import Chunk
 from app.services import search as search_service
-from app.services.embeddings import EmbeddingError
+from app.services.embeddings import EmbeddingBusyError, EmbeddingError
 from app.services.search import build_search_query
-from tests.embedding_fakes import KeywordProvider
+from tests.embedding_fakes import FakeClock, KeywordProvider, limited_provider
 from tests.helpers import auth_headers, create_collection, upload
 
 KEYWORDS = ["cats", "databases", "cooking", "rockets"]
@@ -211,6 +211,37 @@ async def test_filtered_search_finds_owner_chunks_beyond_nearest_candidates(
 
     results = (await search(client, alice, alice_collection, "cats")).json()
     assert [r["document_name"] for r in results] == ["alice.txt"]
+
+
+async def test_busy_embedding_service_is_503_with_retry_after_header(client, keywords, monkeypatch):
+    headers = await auth_headers(client, "owner@example.com")
+    collection_id = await create_collection(client, headers)
+
+    async def busy(text):
+        raise EmbeddingBusyError(retry_after=33.2)
+
+    monkeypatch.setattr(keywords, "embed_query", busy)
+    response = await search(client, headers, collection_id, "cats")
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "34"  # rounded up, never earlier than allowed
+    assert response.json() == {"detail": "Embedding service is busy; retry in about 34 seconds"}
+
+
+async def test_real_limiter_makes_search_fail_fast_instead_of_hanging(client):
+    clock = FakeClock()
+    provider = limited_provider(clock, requests=1, query_max_wait=20)
+    await provider.embed_documents(["something else used the only slot"], token_counts=[10])
+    clock.now += 10  # 50 s until it frees up
+    app.dependency_overrides[embedding_provider] = lambda: provider
+
+    headers = await auth_headers(client, "owner@example.com")
+    collection_id = await create_collection(client, headers)
+    response = await search(client, headers, collection_id, "cats")
+
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "50"
+    assert "busy" in response.json()["detail"]
+    assert clock.now == 1010.0  # it answered at once; no waiting happened
 
 
 # --- Query plans ---
