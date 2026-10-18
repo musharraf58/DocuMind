@@ -1,6 +1,7 @@
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
+import fakeredis
 import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -11,6 +12,7 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.redis import get_redis
 from app.main import app
 from app.models import Base
 from app.services.queue import get_queue
@@ -75,6 +77,7 @@ def job_queue(test_engine):
 
 @pytest.fixture
 async def client(test_engine, job_queue) -> AsyncGenerator[AsyncClient]:
+    fake_redis = fakeredis.aioredis.FakeRedis()
     session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
 
     # Like production: every request gets its own fresh session.
@@ -84,6 +87,7 @@ async def client(test_engine, job_queue) -> AsyncGenerator[AsyncClient]:
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_queue] = lambda: job_queue  # never a real broker
+    app.dependency_overrides[get_redis] = lambda: fake_redis  # never a real Redis
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
