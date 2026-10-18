@@ -1,6 +1,7 @@
 import json
 import logging
 
+import fakeredis
 import httpx
 import pytest
 from pydantic import SecretStr
@@ -230,11 +231,21 @@ def test_api_key_is_hidden_when_printed():
     assert API_KEY not in str(get_settings().EMBEDDING_API_KEY)
 
 
+async def test_providers_built_on_one_redis_share_the_rate_limit_window(monkeypatch):
+    monkeypatch.setattr(get_settings(), "EMBEDDING_PROVIDER", "voyage")
+    shared = fakeredis.FakeServer()
+    api = get_embedding_provider(fakeredis.aioredis.FakeRedis(server=shared))
+    worker = get_embedding_provider(fakeredis.aioredis.FakeRedis(server=shared))
+    await worker.limiter.acquire(1000)
+    # Each request would otherwise think the whole budget was free.
+    assert await api.limiter.usage() == (1, 1000)
+
+
 def test_factory_selects_provider_from_settings(monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "voyage")
     monkeypatch.setattr(settings, "EMBEDDING_BATCH_SIZE", 7)
-    provider = get_embedding_provider()
+    provider = get_embedding_provider(fakeredis.aioredis.FakeRedis())
     assert isinstance(provider, VoyageEmbeddingProvider)
     assert (provider.model, provider.dimensions, provider.batch_size) == ("voyage-4-lite", 1024, 7)
 
@@ -244,9 +255,6 @@ def test_factory_selects_provider_from_settings(monkeypatch):
     assert provider.limiter.document_request_budget == 2  # ingestion's share
     assert provider.token_budget == 4750  # minus 5% held back for queries
     assert (provider.max_retries, provider.retry_base_seconds) == (6, 2)
-    # Every provider object shares the one limiter, or each request would think
-    # the whole budget was free.
-    assert get_embedding_provider().limiter is provider.limiter
 
     monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "fake")
     fake = get_embedding_provider()

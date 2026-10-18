@@ -13,7 +13,6 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.main import app
 from app.models import Base
-from app.services.embeddings import reset_rate_limiters
 
 # Tests use their own database so they can never touch your dev data.
 # Derived from DATABASE_URL: same server and credentials, different DB name.
@@ -100,12 +99,6 @@ def storage_dir(tmp_path, monkeypatch) -> Path:
 def fake_embeddings(monkeypatch) -> None:
     """Every test embeds with the fake provider unless it builds its own."""
     monkeypatch.setattr(get_settings(), "EMBEDDING_PROVIDER", "fake")
-
-
-@pytest.fixture(autouse=True)
-def fresh_rate_limiter() -> None:
-    """The process-wide limiter remembers what was sent; start each test clean."""
-    reset_rate_limiters()
 
 
 @pytest.fixture(autouse=True)
