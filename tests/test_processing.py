@@ -12,7 +12,7 @@ from app.core.config import get_settings
 from app.models import Chunk, Document, DocumentStatus
 from app.services import processing
 from app.services.chunking import ChunkData
-from app.services.documents import mark_pending
+from app.services.documents import queue_for_processing
 from app.services.embeddings import (
     EmbeddingError,
     EmbeddingProvider,
@@ -40,7 +40,7 @@ async def uploaded(client, db: AsyncSession, filename: str, content: bytes) -> D
     headers = await auth_headers(client, f"{uuid.uuid4().hex[:8]}@example.com")
     collection_id = await create_collection(client, headers)
     response = await upload(client, headers, collection_id, filename, content)
-    assert response.status_code == 201, response.text
+    assert response.status_code == 202, response.text
     return await db.get(Document, uuid.UUID(response.json()["id"]))
 
 
@@ -49,7 +49,7 @@ async def run(db: AsyncSession, document: Document, embedder: EmbeddingProvider 
     embedder = embedder or FakeEmbeddingProvider(model="fake-model", dimensions=DIMENSIONS)
     await db.refresh(document)
     if document.status != DocumentStatus.pending:
-        await mark_pending(db, document)
+        await queue_for_processing(db, document)
     result = await run_job(db, document.id, get_storage(), embedder)
     await db.refresh(document)
     return result

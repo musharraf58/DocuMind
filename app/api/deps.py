@@ -8,6 +8,7 @@ from app.core.database import get_db
 from app.core.security import decode_access_token
 from app.models import User
 from app.services.embeddings import EmbeddingError, EmbeddingProvider, get_embedding_provider
+from app.services.queue import JobQueue, get_queue
 from app.services.storage import StorageBackend, get_storage
 
 # HTTPBearer makes Swagger's "Authorize" dialog a single "Value" box for a token.
@@ -17,6 +18,7 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 StorageDep = Annotated[StorageBackend, Depends(get_storage)]
+QueueDep = Annotated[JobQueue, Depends(get_queue)]
 
 
 def embedding_provider() -> EmbeddingProvider:

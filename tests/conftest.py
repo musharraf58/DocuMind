@@ -13,6 +13,7 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.main import app
 from app.models import Base
+from app.services.queue import get_queue
 
 # Tests use their own database so they can never touch your dev data.
 # Derived from DATABASE_URL: same server and credentials, different DB name.
@@ -65,7 +66,15 @@ async def clean_tables(test_engine) -> AsyncGenerator[None]:
 
 
 @pytest.fixture
-async def client(test_engine) -> AsyncGenerator[AsyncClient]:
+def job_queue(test_engine):
+    """The fake queue the API enqueues into (see tests/queue_fakes.py)."""
+    from tests.queue_fakes import RecordingQueue
+
+    return RecordingQueue(async_sessionmaker(test_engine, expire_on_commit=False))
+
+
+@pytest.fixture
+async def client(test_engine, job_queue) -> AsyncGenerator[AsyncClient]:
     session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
 
     # Like production: every request gets its own fresh session.
@@ -74,6 +83,7 @@ async def client(test_engine) -> AsyncGenerator[AsyncClient]:
             yield session
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_queue] = lambda: job_queue  # never a real broker
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
