@@ -11,7 +11,7 @@ from app.schemas.chunk import ChunkRead
 from app.schemas.document import DocumentRead
 from app.services import collections as collection_service
 from app.services import documents as document_service
-from app.services import processing as processing_service
+from app.services import jobs
 
 router = APIRouter(tags=["documents"])
 
@@ -98,14 +98,17 @@ async def process_document(
     storage: StorageDep,
     embedder: EmbedderDep,
 ):
-    """Extract, chunk and embed the document now, waiting for the result.
-
-    Temporary: Phase 5 replaces this with a background queue. A file that
-    can't be read is not an HTTP error: the response is 200 with status
-    "failed" and an error_message. 409 if it is already being processed.
-    """
+    """Process the document now, waiting for the result. (Replaced by a queued
+    /reprocess shortly.) 409 if it is already being processed."""
     document = await document_service.get_owned_document(db, document_id, user.id)
-    return await processing_service.process_document(db, storage, embedder, document)
+    if document.status == DocumentStatus.processing:
+        raise HTTPException(status_code=409, detail="Document is already being processed")
+    await document_service.mark_pending(db, document)
+    result = await jobs.run_job(db, document.id, storage, embedder)
+    if result.outcome in (jobs.Outcome.skipped, jobs.Outcome.lost):
+        raise HTTPException(status_code=409, detail="Processing was taken over by another run")
+    await db.refresh(document)
+    return document
 
 
 @router.get("/documents/{document_id}/chunks", response_model=list[ChunkRead])

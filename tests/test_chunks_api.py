@@ -278,4 +278,5 @@ async def test_finished_run_releases_its_claim(client, db):
     db.expire_all()
     document = await db.get(Document, uuid.UUID(doc_id))
     assert document.processing_run_id is None
-    assert document.processing_started_at is None
+    assert document.heartbeat_at is None
+    assert document.finished_at is not None

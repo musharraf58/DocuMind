@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import clock
 from app.core.config import get_settings
 from app.models import Chunk, Collection, Document, DocumentStatus
 from app.services.storage import StorageBackend
@@ -192,6 +193,15 @@ async def list_documents(
         query.order_by(Document.created_at.desc(), Document.id).limit(limit).offset(offset)
     )
     return result.all()
+
+
+async def mark_pending(db: AsyncSession, document: Document) -> None:
+    """Queue the document for (re)processing: "pending", attempts reset."""
+    document.status = DocumentStatus.pending
+    document.error_message = None
+    document.attempts = 0
+    document.queued_at = clock.utcnow()
+    await db.commit()
 
 
 async def list_chunks(
