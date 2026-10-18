@@ -16,6 +16,7 @@ from app.services import processing
 from app.services.chunking import ChunkData
 from app.services.embeddings import (
     EmbeddingBusyError,
+    EmbeddingError,
     FakeEmbeddingProvider,
     RetryableEmbeddingError,
     VoyageEmbeddingProvider,
@@ -275,3 +276,40 @@ async def test_job_never_touches_a_ready_or_failed_document(client, db):
         await db.commit()
         assert (await job(db, doc_id)).outcome == Outcome.skipped
         assert (await state(db, doc_id)).status == status
+
+
+async def test_a_ready_document_never_has_chunks_without_embeddings(client, db, monkeypatch):
+    """Whatever happens along the way, every chunk of every ready document has
+    a vector and a model name."""
+    from app.services.integrity import ready_documents_missing_embeddings
+
+    ids = [(await new_document(client, TEXT + f" {n}".encode()))[2] for n in range(4)]
+    a, b, c, d = ids
+
+    await job(db, a)  # plain success
+
+    await job(db, b)  # success, then a reprocess that fails mid-insert
+    await db.execute(update(Document).where(Document.id == b).values(status=DocumentStatus.pending))
+    await db.commit()
+    bad = [ChunkData(0, "fine", None, None, 1), ChunkData(1, "null \x00 byte", None, None, 2)]
+    with monkeypatch.context() as patch:
+        patch.setattr(processing, "chunk_segments", lambda *args: bad)
+        assert (await job(db, b)).outcome == Outcome.failed
+
+    await job(db, c, failing(1))  # a transient failure, then success
+    await job(db, c)
+
+    await job(db, d)  # success, then a reprocess that fails permanently
+    await db.execute(update(Document).where(Document.id == d).values(status=DocumentStatus.pending))
+    await db.commit()
+    result = await job(db, d, failing(error=EmbeddingError("Embedding service rejected the input")))
+    assert result.outcome == Outcome.failed
+
+    assert await ready_documents_missing_embeddings(db) == []
+    ready = (
+        await db.scalars(select(Document.id).where(Document.status == DocumentStatus.ready))
+    ).all()
+    assert set(ready) >= {a, c}
+    for document_id in ready:
+        chunks = (await db.scalars(select(Chunk).where(Chunk.document_id == document_id))).all()
+        assert chunks and all(ch.embedding is not None and ch.embedding_model for ch in chunks)
