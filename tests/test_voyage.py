@@ -240,7 +240,8 @@ def test_factory_selects_provider_from_settings(monkeypatch):
 
     # Rate limiting and retries come from the settings.
     assert provider.limiter.token_budget == 5000  # 10,000 x 0.5
-    assert provider.limiter.request_budget == 2  # one below the limit of 3
+    assert provider.limiter.request_budget == 3  # the account's limit
+    assert provider.limiter.document_request_budget == 2  # ingestion's share
     assert provider.token_budget == 4750  # minus 5% held back for queries
     assert (provider.max_retries, provider.retry_base_seconds) == (6, 2)
     # Every provider object shares the one limiter, or each request would think

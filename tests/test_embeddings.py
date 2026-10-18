@@ -375,15 +375,19 @@ async def test_a_429_holds_other_callers_too():
     await provider.embed_documents(texts(1), token_counts=[10])
     # The provider said "come back in 40 s": a different caller sharing the
     # limiter now (at the moment of the 429) would have to wait for that too.
-    first = provider.times[0]
-    assert first + 40 <= provider.limiter._blocked_until <= first + 50
+    # Right at the moment of the 429, any caller (even a query, with the whole
+    # budget free) would have to wait out the provider's 40 s, plus jitter.
+    clock.now = provider.times[0]
+    held_for = await provider.limiter.time_until_available(1, "query")
+    assert 40 <= held_for <= 50
 
 
 async def test_server_errors_do_not_hold_the_limiter():
     clock = FakeClock()
     provider = limited_provider(clock, requests=10, failures=[RetryableEmbeddingError("503")])
     await provider.embed_documents(texts(1), token_counts=[10])
-    assert provider.limiter._blocked_until == 0  # a provider fault says nothing about our quota
+    # A provider fault says nothing about our quota: nobody is held.
+    assert await provider.limiter.time_until_available(1, "query") == 0
     assert len(provider.times) == 2  # but the retry was still sent, and counted
 
 

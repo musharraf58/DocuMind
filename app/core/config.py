@@ -59,7 +59,8 @@ class Settings(BaseSettings):
     # Fraction of the TOKEN limit we plan to use. Our tiktoken count can be well
     # below the provider's own count (different tokenizer, plus the retrieval
     # prompt the provider adds to each text), so leave plenty of room.
-    # Requests are counted exactly and don't need this (see embedding_request_budget).
+    # Requests are counted exactly and don't need this; how they are shared
+    # between ingestion and searches is EMBEDDING_INGEST_RPM_SHARE.
     EMBEDDING_RATE_SAFETY: float = Field(default=0.5, gt=0, le=1)
 
     # Retries per batch (each batch starts with a fresh count).
@@ -98,10 +99,16 @@ class Settings(BaseSettings):
 
     @property
     def embedding_request_budget(self) -> int:
-        """Requests we allow ourselves per 60 seconds: one below the limit (at
-        least 1). Requests are counted exactly; the one-request margin covers
-        our clock and the provider's not lining up perfectly."""
-        return max(1, self.EMBEDDING_RPM_LIMIT - 1)
+        """Requests per 60 seconds for everyone together: the account's limit.
+        (Small clock differences with the provider are absorbed by the 429
+        handling: Retry-After and the minimum wait.)"""
+        return self.EMBEDDING_RPM_LIMIT
+
+    @property
+    def embedding_ingest_request_budget(self) -> int:
+        """Requests per 60 seconds background ingestion may use (at least 1)."""
+        share = self.EMBEDDING_RPM_LIMIT * self.EMBEDDING_INGEST_RPM_SHARE
+        return max(1, math.floor(share + 1e-9))
 
     @property
     def embedding_min_retry_wait(self) -> float:
@@ -115,9 +122,8 @@ class Settings(BaseSettings):
 
     @property
     def embedding_query_reserve_requests(self) -> int:
-        """One request slot per window stays free for queries (when there are
-        at least two; with a single slot, documents and queries share it)."""
-        return 1 if self.embedding_request_budget >= 2 else 0
+        """Request slots per window that only searches may use."""
+        return self.embedding_request_budget - self.embedding_ingest_request_budget
 
     @property
     def embedding_document_token_budget(self) -> int:

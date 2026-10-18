@@ -31,7 +31,7 @@ async def test_requests_within_budget_go_through_without_waiting():
     assert (await limiter.acquire(3000)).waited == 0
     assert (await limiter.acquire(3000)).waited == 0
     assert clock.sleeps == []
-    assert limiter.usage() == (2, 6000)
+    assert (await limiter.usage()) == (2, 6000)
 
 
 async def test_request_budget_makes_the_third_request_wait_for_the_first_to_expire():
@@ -45,7 +45,7 @@ async def test_request_budget_makes_the_third_request_wait_for_the_first_to_expi
     waited = (await limiter.acquire(10)).waited  # must wait until the first leaves (t = 60)
     assert clock.now == pytest.approx(start + 60 + PAD)
     assert waited == pytest.approx(55 + PAD)
-    assert limiter.usage() == (2, 20)
+    assert (await limiter.usage()) == (2, 20)
 
 
 async def test_token_budget_waits_only_until_enough_old_tokens_expire():
@@ -70,7 +70,7 @@ async def test_a_request_that_could_never_fit_fails_at_once():
     with pytest.raises(RequestTooLargeError, match="9000 tokens; at most 8000"):
         await limiter.acquire(9000)
     assert clock.sleeps == []
-    assert limiter.usage() == (0, 0)
+    assert (await limiter.usage()) == (0, 0)
 
 
 async def test_documents_leave_room_for_queries():
@@ -118,14 +118,14 @@ async def test_query_fails_fast_when_the_wait_is_too_long():
     assert info.value.retry_after == pytest.approx(55)
     assert "retry in about 55 seconds" in str(info.value)
     assert clock.now == before and clock.sleeps == []  # didn't wait
-    assert limiter.usage() == (1, 10)  # and didn't use up a slot
+    assert (await limiter.usage()) == (1, 10)  # and didn't use up a slot
 
 
 async def test_penalty_holds_everyone_until_it_passes():
     clock = FakeClock()
     limiter = make(clock)
     start = clock.now
-    limiter.penalize(30)
+    await limiter.penalize(30)
 
     with pytest.raises(EmbeddingBusyError) as info:
         await limiter.acquire(10, kind="query", max_wait=10)
@@ -194,8 +194,8 @@ async def test_time_until_available_matches_acquire_and_reserves_nothing():
     await limiter.acquire(10)
     clock.now += 15
 
-    assert limiter.time_until_available(10) == pytest.approx(45)
-    assert limiter.usage() == (1, 10)  # only looked
+    assert await limiter.time_until_available(10) == pytest.approx(45)
+    assert (await limiter.usage()) == (1, 10)  # only looked
     waited = (await limiter.acquire(10)).waited
     assert waited == pytest.approx(45 + PAD)
 
@@ -204,17 +204,17 @@ async def test_correcting_a_reservation_raises_but_never_lowers_its_tokens():
     clock = FakeClock()
     limiter = make(clock, tokens=1000, requests=10)
     reservation = await limiter.acquire(400)
-    reservation.correct(700)  # the provider counted more than we estimated
-    assert limiter.usage() == (1, 700)
-    reservation.correct(0)  # no count reported
-    reservation.correct(500)  # or a smaller one
-    assert limiter.usage() == (1, 700)
+    await reservation.correct(700)  # the provider counted more than we estimated
+    assert (await limiter.usage()) == (1, 700)
+    await reservation.correct(0)  # no count reported
+    await reservation.correct(500)  # or a smaller one
+    assert (await limiter.usage()) == (1, 700)
 
 
 async def test_corrected_count_makes_the_next_request_wait():
     clock = FakeClock()
     limiter = make(clock, tokens=1000, requests=10)
-    (await limiter.acquire(500)).correct(900)
+    await (await limiter.acquire(500)).correct(900)
     # By our estimate 500 + 400 would fit; by the provider's count it doesn't.
     start = clock.now
     await limiter.acquire(400)
