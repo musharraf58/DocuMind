@@ -1,3 +1,4 @@
+import math
 import uuid
 
 from fastapi import APIRouter, HTTPException
@@ -6,7 +7,7 @@ from app.api.deps import CurrentUser, DbSession, EmbedderDep
 from app.schemas.search import SearchRequest, SearchResult
 from app.services import collections as collection_service
 from app.services import search as search_service
-from app.services.embeddings import EmbeddingError
+from app.services.embeddings import EmbeddingBusyError, EmbeddingError
 
 router = APIRouter(tags=["search"])
 
@@ -28,5 +29,13 @@ async def search_collection(
         return await search_service.search_collection(
             db, embedder, collection, body.query, body.limit
         )
+    except EmbeddingBusyError as exc:
+        # The shared embedding quota is used up for now. 503 rather than 429:
+        # this caller didn't send too much, the service as a whole is busy.
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc),
+            headers={"Retry-After": str(max(1, math.ceil(exc.retry_after)))},
+        ) from exc
     except EmbeddingError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

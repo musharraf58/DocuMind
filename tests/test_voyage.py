@@ -1,4 +1,5 @@
 import json
+import logging
 
 import httpx
 import pytest
@@ -12,19 +13,20 @@ from app.services.embeddings import (
     VoyageEmbeddingProvider,
     get_embedding_provider,
 )
-from tests.embedding_fakes import DIMENSIONS, RecordingSleep
+from app.services.embeddings.rate_limit import SlidingWindowRateLimiter
+from tests.embedding_fakes import DIMENSIONS, FakeClock, RecordingSleep
 
 API_KEY = "pa-test-SECRET-key-123"
 
 
 def voyage(handler, api_key: str = API_KEY, **kwargs) -> VoyageEmbeddingProvider:
     kwargs.setdefault("max_retries", 2)
+    kwargs.setdefault("sleep", RecordingSleep())
     return VoyageEmbeddingProvider(
         api_key=SecretStr(api_key),
         transport=httpx.MockTransport(handler),
         model="voyage-4-lite",
         dimensions=DIMENSIONS,
-        sleep=RecordingSleep(),
         **kwargs,
     )
 
@@ -114,8 +116,24 @@ async def test_gives_up_with_safe_message_after_retries():
     assert str(info.value) == "Embedding service is unavailable; try again later"
 
 
-async def test_retry_after_header_is_used():
+async def test_retry_after_header_is_used_when_longer_than_the_minimum():
+    responses = iter([httpx.Response(429, headers={"Retry-After": "45"})])
+    provider = voyage(lambda request: next(responses, None) or success(request))
+    await provider.embed_documents(["x"])
+    [delay] = provider._sleep.delays
+    assert 45 <= delay <= 45 * 1.25
+
+
+async def test_short_retry_after_on_429_is_raised_to_the_minimum():
     responses = iter([httpx.Response(429, headers={"Retry-After": "3"})])
+    provider = voyage(lambda request: next(responses, None) or success(request), min_retry_wait=20)
+    await provider.embed_documents(["x"])
+    [delay] = provider._sleep.delays
+    assert 20 <= delay <= 25
+
+
+async def test_retry_after_on_503_is_used_as_is():
+    responses = iter([httpx.Response(503, headers={"Retry-After": "3"})])
     provider = voyage(lambda request: next(responses, None) or success(request))
     await provider.embed_documents(["x"])
     assert provider._sleep.delays == [3]
@@ -170,6 +188,35 @@ async def test_malformed_response_is_a_safe_error(response):
         await provider.embed_documents(["x"])
 
 
+async def test_429_with_retry_after_waits_that_long_through_the_shared_limiter():
+    clock = FakeClock()
+    limiter = SlidingWindowRateLimiter(8000, 3, clock=clock.clock, sleep=clock.sleep)
+    times = []
+    responses = iter([httpx.Response(429, headers={"Retry-After": "25"})])
+
+    def handler(request):
+        times.append(clock.now)
+        return next(responses, None) or success(request)
+
+    provider = voyage(handler, limiter=limiter, sleep=clock.sleep)
+    assert len(await provider.embed_documents(["x"], token_counts=[5])) == 1
+    assert 25 <= times[1] - times[0] <= 25 * 1.25 + 0.1
+
+
+async def test_retry_after_http_date_or_garbage_falls_back_to_backoff():
+    clock = FakeClock()
+    responses = iter(
+        [httpx.Response(429, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"})]
+    )
+    provider = voyage(
+        lambda request: next(responses, None) or success(request),
+        sleep=clock.sleep,
+        min_retry_wait=20,
+    )
+    await provider.embed_documents(["x"])
+    assert 20 <= clock.sleeps[0] <= 25  # unparseable header: the minimum wait applies
+
+
 def test_token_limit_follows_model():
     lite = VoyageEmbeddingProvider(api_key=SecretStr("k"), model="voyage-4-lite", dimensions=8)
     large = VoyageEmbeddingProvider(api_key=SecretStr("k"), model="voyage-4-large", dimensions=8)
@@ -191,12 +238,62 @@ def test_factory_selects_provider_from_settings(monkeypatch):
     assert isinstance(provider, VoyageEmbeddingProvider)
     assert (provider.model, provider.dimensions, provider.batch_size) == ("voyage-4-lite", 1024, 7)
 
+    # Rate limiting and retries come from the settings.
+    assert provider.limiter.token_budget == 5000  # 10,000 x 0.5
+    assert provider.limiter.request_budget == 2  # one below the limit of 3
+    assert provider.token_budget == 4750  # minus 5% held back for queries
+    assert (provider.max_retries, provider.retry_base_seconds) == (6, 2)
+    # Every provider object shares the one limiter, or each request would think
+    # the whole budget was free.
+    assert get_embedding_provider().limiter is provider.limiter
+
     monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "fake")
     fake = get_embedding_provider()
     assert isinstance(fake, FakeEmbeddingProvider)
     # Never labelled with the real model's name, or fake vectors stored during
     # development would be searched alongside real ones.
     assert fake.model == "fake-sha256" != settings.EMBEDDING_MODEL
+    assert fake.limiter is None  # no network, so nothing to throttle
+
+
+@pytest.mark.parametrize("status", [401, 429, 503])
+async def test_api_key_and_response_body_never_reach_the_logs(caplog, status):
+    caplog.set_level(logging.DEBUG)  # everything, from every logger
+    body = {"detail": f"key {API_KEY} is bad; your input was: very secret text"}
+    provider = voyage(lambda request: httpx.Response(status, json=body), max_retries=1)
+    with pytest.raises(EmbeddingError):
+        await provider.embed_documents(["very secret text"])
+    assert API_KEY not in caplog.text
+    assert "very secret text" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("headers", "logged"),
+    [
+        ({"Retry-After": "7"}, "HTTP 429 (Retry-After: 7)"),
+        ({}, "HTTP 429 (Retry-After: none)"),
+    ],
+)
+async def test_429_logs_status_and_retry_after(caplog, headers, logged):
+    caplog.set_level(logging.WARNING, logger="app")
+    responses = iter([httpx.Response(429, headers=headers)])
+    provider = voyage(lambda request: next(responses, None) or success(request))
+    await provider.embed_documents(["x"])
+    assert logged in caplog.text
+    assert API_KEY not in caplog.text
+
+
+async def test_hostile_retry_after_is_sanitized_before_logging(caplog):
+    caplog.set_level(logging.WARNING, logger="app")
+    hostile = "7\r\nX-Evil: <script>" + "x" * 100
+    responses = iter([httpx.Response(429, headers={"Retry-After": hostile})])
+    provider = voyage(lambda request: next(responses, None) or success(request))
+    await provider.embed_documents(["x"])
+
+    [line] = [r.getMessage() for r in caplog.records if "Retry-After" in r.getMessage()]
+    value = line.split("(Retry-After: ", 1)[1].rstrip(")")
+    assert len(value) <= 40
+    assert not set(value) & set("<>\r\n")
 
 
 def test_dimension_setting_must_match_database_column(monkeypatch):

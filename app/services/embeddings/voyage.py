@@ -1,15 +1,11 @@
 import logging
+import re
 
 import httpx
 from pydantic import SecretStr
 
-from app.services.embeddings.base import (
-    BatchResult,
-    EmbeddingError,
-    EmbeddingProvider,
-    InputType,
-    RetryableEmbeddingError,
-)
+from app.services.embeddings.base import BatchResult, EmbeddingProvider, InputType
+from app.services.embeddings.errors import EmbeddingError, RetryableEmbeddingError
 
 logger = logging.getLogger(__name__)
 
@@ -80,11 +76,19 @@ class VoyageEmbeddingProvider(EmbeddingProvider):
             raise RetryableEmbeddingError("Could not reach the embedding service") from exc
 
         if response.status_code != 200:
-            # Status only: the body may contain input text.
-            logger.warning("Voyage embeddings request failed with HTTP %d", response.status_code)
+            # Status and Retry-After only: the body may contain input text.
+            logger.warning(
+                "Voyage embeddings request failed with HTTP %d (Retry-After: %s)",
+                response.status_code,
+                _header_for_log(response.headers.get("Retry-After")),
+            )
             message = MESSAGES.get(response.status_code, UNAVAILABLE)
             if response.status_code in RETRYABLE_STATUSES:
-                raise RetryableEmbeddingError(message, _retry_after(response))
+                raise RetryableEmbeddingError(
+                    message,
+                    _retry_after(response),
+                    rate_limited=response.status_code == 429,
+                )
             if response.status_code not in MESSAGES:
                 message = f"Embedding request failed (HTTP {response.status_code})"
             raise EmbeddingError(message)
@@ -99,8 +103,16 @@ class VoyageEmbeddingProvider(EmbeddingProvider):
         return BatchResult(vectors, tokens)
 
 
+def _header_for_log(value: str | None) -> str:
+    """A header value made safe to log: only plain characters, and short."""
+    if value is None:
+        return "none"
+    return re.sub(r"[^0-9A-Za-z ,:.+-]", "?", value)[:40]
+
+
 def _retry_after(response: httpx.Response) -> float | None:
     try:
-        return float(response.headers["Retry-After"])
+        seconds = float(response.headers["Retry-After"])
     except (KeyError, ValueError):
         return None  # missing, or an HTTP date (rare); fall back to our backoff
+    return seconds if seconds >= 0 else None
