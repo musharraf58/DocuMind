@@ -39,6 +39,14 @@ def test_empty_min_retry_wait_in_env_file_means_computed(tmp_path):
     assert settings.embedding_min_retry_wait == 20
 
 
+def test_job_settings_defaults():
+    settings = make()
+    assert settings.MAX_JOB_ATTEMPTS == 4
+    assert settings.SWEEP_PENDING_MINUTES == 3
+    assert settings.STALE_PROCESSING_MINUTES == 10
+    assert settings.EMBEDDING_INGEST_RPM_SHARE == 0.67
+
+
 def test_request_budget_is_never_below_one():
     settings = make(EMBEDDING_RPM_LIMIT=1)
     assert settings.embedding_request_budget == 1

@@ -74,6 +74,22 @@ class Settings(BaseSettings):
     # A search query never waits longer than this for embedding capacity; past
     # it the API answers "busy, retry in N seconds" instead of hanging.
     EMBEDDING_QUERY_MAX_WAIT_SECONDS: float = Field(default=20, gt=0)
+    # Share of the requests per minute that background ingestion may use; the
+    # rest stays free for interactive searches (0.67 of 3 = 2 requests).
+    EMBEDDING_INGEST_RPM_SHARE: float = Field(default=0.67, gt=0, le=1)
+
+    # Background jobs (Celery worker).
+    # Tries per document for transient failures (rate limits, timeouts, 5xx).
+    MAX_JOB_ATTEMPTS: int = Field(default=4, ge=1)
+    # Wait before retrying a transient failure: BASE, then 2x, then 4x ...
+    JOB_RETRY_BASE_SECONDS: float = Field(default=30, gt=0)
+    # Longest one job may run. At 10,000 tokens/minute the largest allowed
+    # document takes about 105 minutes to embed.
+    JOB_TIMEOUT_MINUTES: float = Field(default=120, gt=0)
+    # Sweeper: re-enqueue documents "pending" for longer than this...
+    SWEEP_PENDING_MINUTES: float = Field(default=3, gt=0)
+    # ...and treat "processing" documents with no heartbeat for this long as stuck.
+    STALE_PROCESSING_MINUTES: float = Field(default=10, gt=0)
 
     @property
     def embedding_token_budget(self) -> int:

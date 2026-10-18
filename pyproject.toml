@@ -22,10 +22,12 @@ dependencies = [
     "anyio>=4.15.1",
     "pgvector>=0.5.1",
     "httpx>=0.28.1",
+    "celery[redis]>=5.6.3",
 ]
 
 [dependency-groups]
 dev = [
+    "fakeredis[lua]>=2.40.0",
     "pytest>=8.2",
     "pytest-asyncio>=0.24",
     "ruff>=0.6",
