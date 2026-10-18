@@ -354,6 +354,18 @@ docker compose up -d postgres
 uv run pytest
 ```
 
+Or inside the running `api` container, which includes pytest, ruff and the tests (docker
+compose builds the Dockerfile's `dev` stage; a plain `docker build .` makes the slimmer
+`prod` image without them):
+
+```bash
+docker compose exec api pytest -q
+docker compose exec api ruff check .
+```
+
+If those commands report `executable file not found`, the container is running an older
+image: run `docker compose up -d --build` once to rebuild it.
+
 ## Lint and format
 
 ```bash

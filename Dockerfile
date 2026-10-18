@@ -1,4 +1,8 @@
-FROM python:3.12-slim
+# Two images from one file:
+#   dev  (what docker compose builds): the app plus pytest, ruff and the tests,
+#        so `docker compose exec api pytest -q` and `... ruff check .` work.
+#   prod (the default for a plain `docker build .`): only what the app needs.
+FROM python:3.12-slim AS base
 
 # uv binary, copied from the official image
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
@@ -26,3 +30,14 @@ COPY app ./app
 EXPOSE 8000
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+FROM base AS dev
+# The dev dependency group (pytest, ruff, ...), then the tests themselves.
+RUN uv sync --frozen --no-install-project
+COPY tests ./tests
+
+
+# Last stage = the default target, so a plain `docker build .` makes the slim image.
+FROM base AS prod
+
