@@ -177,6 +177,21 @@ async def run_job(
     return JobResult(Outcome.ready)
 
 
+async def fail_without_processing(
+    db: AsyncSession, document_id: uuid.UUID, message: str
+) -> JobResult:
+    """The worker can't process anything (e.g. embedding misconfigured): claim
+    the document and fail it with the reason, so it doesn't sit pending."""
+    claimed = await claim(db, document_id)
+    if claimed is None:
+        return JobResult(Outcome.skipped)
+    run_id, _ = claimed
+    logger.error("Document %s: cannot process: %s", document_id, message)
+    if not await mark_failed(db, document_id, run_id, message):
+        return JobResult(Outcome.lost)
+    return JobResult(Outcome.failed, message=message)
+
+
 async def mark_failed(
     db: AsyncSession, document_id: uuid.UUID, run_id: uuid.UUID | None, message: str
 ) -> bool:
