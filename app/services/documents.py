@@ -5,10 +5,11 @@ from collections.abc import AsyncIterator, Sequence
 from pathlib import PurePosixPath
 
 from fastapi import HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import clock
 from app.core.config import get_settings
 from app.models import Chunk, Collection, Document, DocumentStatus
 from app.services.storage import StorageBackend
@@ -136,6 +137,7 @@ async def upload_document(
         content_hash=inspector.content_hash,
         storage_key=storage_key,
         status=DocumentStatus.pending,
+        queued_at=clock.utcnow(),
     )
     db.add(document)
     try:
@@ -192,6 +194,31 @@ async def list_documents(
         query.order_by(Document.created_at.desc(), Document.id).limit(limit).offset(offset)
     )
     return result.all()
+
+
+async def queue_for_processing(db: AsyncSession, document: Document) -> bool:
+    """Set the document back to "pending" (attempts reset) unless it is already
+    pending or processing. One conditional UPDATE, so two simultaneous
+    requests can't both succeed. Returns False if it was busy."""
+    queued = await db.scalar(
+        update(Document)
+        .where(
+            Document.id == document.id,
+            Document.status.not_in([DocumentStatus.pending, DocumentStatus.processing]),
+        )
+        .values(
+            status=DocumentStatus.pending,
+            error_message=None,
+            attempts=0,
+            queued_at=clock.utcnow(),
+            finished_at=None,
+        )
+        .returning(Document.id)
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+    await db.refresh(document)
+    return queued is not None
 
 
 async def list_chunks(

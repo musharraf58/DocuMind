@@ -13,7 +13,7 @@ from app.services.embeddings.errors import (
     RequestTooLargeError,
     RetryableEmbeddingError,
 )
-from app.services.embeddings.rate_limit import Kind, SlidingWindowRateLimiter, estimate_seconds
+from app.services.embeddings.rate_limit import Kind, RateLimiter, estimate_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ class EmbeddingProvider(ABC):
         max_retries: int = 6,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         token_budget: int | None = None,
-        limiter: SlidingWindowRateLimiter | None = None,
+        limiter: RateLimiter | None = None,
         retry_base_seconds: float = 2.0,
         retry_max_seconds: float = 60.0,
         query_max_wait: float | None = 20.0,
@@ -252,8 +252,8 @@ class EmbeddingProvider(ABC):
                     # Hold every caller, not just this one, until the provider is
                     # ready again; the next acquire() does the actual waiting,
                     # which can be longer than `delay` if the window is full.
-                    self.limiter.penalize(delay)
-                    real_wait = self.limiter.time_until_available(estimated_tokens, kind)
+                    await self.limiter.penalize(delay)
+                    real_wait = await self.limiter.time_until_available(estimated_tokens, kind)
                     logger.warning(
                         "Embedding request failed (%s); retry %d/%d in about %.0fs%s",
                         exc,
@@ -275,7 +275,7 @@ class EmbeddingProvider(ABC):
                 await self._sleep(delay)
                 waited += delay
         if reservation is not None:
-            reservation.correct(result.total_tokens)
+            await reservation.correct(result.total_tokens)
         self._check_vectors(result.vectors, len(texts))
         return result, waited
 

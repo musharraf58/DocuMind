@@ -60,3 +60,12 @@ def make_docx(text: str = "hello") -> bytes:
 
 def make_pdf(text: str = "hello") -> bytes:
     return f"%PDF-1.4\n{text}\n%%EOF".encode()
+
+
+async def run_queued_jobs():
+    """Run everything the API has queued, as the worker would (uses the fake
+    queue the test client is wired to)."""
+    from app.main import app
+    from app.services.queue import get_queue
+
+    return await app.dependency_overrides[get_queue]().run_all()

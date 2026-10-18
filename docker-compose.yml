@@ -1,18 +1,23 @@
+# Settings shared by the API and the worker (same image, same config).
+x-app: &app
+  build: .
+  image: documind-app
+  env_file: .env
+  environment:
+    # Inside the compose network, services reach each other by service name,
+    # not localhost.
+    DATABASE_URL: postgresql+asyncpg://documind:documind@postgres:5432/documind
+    REDIS_URL: redis://redis:6379/0
+    STORAGE_PATH: /data/storage
+  volumes:
+    # Uploaded files survive container rebuilds. The worker reads them too.
+    - storage_data:/data/storage
+
 services:
   api:
-    build: .
-    env_file: .env
-    environment:
-      # Inside the compose network, services reach each other by service name,
-      # not localhost.
-      DATABASE_URL: postgresql+asyncpg://documind:documind@postgres:5432/documind
-      REDIS_URL: redis://redis:6379/0
-      STORAGE_PATH: /data/storage
+    <<: *app
     ports:
       - "8000:8000"
-    volumes:
-      # Uploaded files survive container rebuilds.
-      - storage_data:/data/storage
     # Apply migrations, then start the server.
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     depends_on:
@@ -30,6 +35,25 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+
+  # Background jobs: processes uploaded documents, one at a time, and runs the
+  # sweeper every minute (Celery beat, started inside the worker with --beat).
+  worker:
+    <<: *app
+    command: >-
+      celery -A app.workers.celery_app worker --beat --concurrency=1
+      --loglevel=INFO --schedule=/tmp/celerybeat-schedule
+    depends_on:
+      # The API applies migrations on start; wait until it's up.
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # On "docker compose stop" Celery stops taking jobs and finishes the
+    # current one (warm shutdown). If that takes longer than this, the job is
+    # killed; the sweeper requeues the document once its heartbeat goes stale.
+    stop_grace_period: 2m
+    restart: unless-stopped
 
   postgres:
     image: pgvector/pgvector:pg16

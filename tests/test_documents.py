@@ -46,7 +46,7 @@ async def test_valid_upload_of_each_type(client, alice, storage_dir, filename) -
 
     response = await upload(client, alice, collection_id, filename, content)
 
-    assert response.status_code == 201
+    assert response.status_code == 202
     body = response.json()
     assert body["original_filename"] == filename
     assert body["content_type"] == expected_type
@@ -78,7 +78,7 @@ async def test_uppercase_extension_is_accepted(client, alice) -> None:
 
     response = await upload(client, alice, collection_id, "SCAN.PDF", make_pdf())
 
-    assert response.status_code == 201
+    assert response.status_code == 202
 
 
 async def test_multibyte_character_split_across_chunks_is_valid_utf8(
@@ -90,7 +90,7 @@ async def test_multibyte_character_split_across_chunks_is_valid_utf8(
 
     response = await upload(client, alice, collection_id, "big.txt", content)
 
-    assert response.status_code == 201
+    assert response.status_code == 202
     assert response.json()["size_bytes"] == len(content)
 
 
@@ -196,7 +196,7 @@ async def test_file_exactly_at_the_limit_is_accepted(
 
     response = await upload(client, alice, collection_id, "exact.txt", b"a" * MB)
 
-    assert response.status_code == 201
+    assert response.status_code == 202
 
 
 # ---------- upload: duplicates ----------
@@ -206,7 +206,7 @@ async def test_duplicate_in_same_collection_is_409_and_leaves_no_extra_file(
     client, alice, storage_dir
 ) -> None:
     collection_id = await create_collection(client, alice)
-    assert (await upload(client, alice, collection_id, "a.txt", b"same bytes")).status_code == 201
+    assert (await upload(client, alice, collection_id, "a.txt", b"same bytes")).status_code == 202
 
     # Even under a different filename, identical bytes are a duplicate.
     again = await upload(client, alice, collection_id, "renamed.txt", b"same bytes")
@@ -219,8 +219,8 @@ async def test_same_file_is_allowed_in_another_collection(client, alice, storage
     first = await create_collection(client, alice, "one")
     second = await create_collection(client, alice, "two")
 
-    assert (await upload(client, alice, first, "a.txt", b"shared")).status_code == 201
-    assert (await upload(client, alice, second, "a.txt", b"shared")).status_code == 201
+    assert (await upload(client, alice, first, "a.txt", b"shared")).status_code == 202
+    assert (await upload(client, alice, second, "a.txt", b"shared")).status_code == 202
     assert len(files_on_disk(storage_dir)) == 2
 
 
@@ -228,8 +228,8 @@ async def test_same_file_is_allowed_for_another_user(client, alice, bob, storage
     alices = await create_collection(client, alice)
     bobs = await create_collection(client, bob)
 
-    assert (await upload(client, alice, alices, "a.txt", b"shared")).status_code == 201
-    assert (await upload(client, bob, bobs, "a.txt", b"shared")).status_code == 201
+    assert (await upload(client, alice, alices, "a.txt", b"shared")).status_code == 202
+    assert (await upload(client, bob, bobs, "a.txt", b"shared")).status_code == 202
 
 
 # ---------- upload: filename safety ----------
@@ -252,7 +252,7 @@ async def test_malicious_filename_cannot_affect_storage_paths(
 
     response = await upload(client, alice, collection_id, sent, content)
 
-    assert response.status_code == 201
+    assert response.status_code == 202
     assert response.json()["original_filename"] == expected
     (stored,) = files_on_disk(storage_dir)
     # Stored as <storage>/<owner uuid>/<document uuid>: nothing from the filename.
@@ -294,7 +294,7 @@ async def test_upload_to_another_users_collection_is_404_and_stores_nothing(
 
 async def _uploaded(client, headers, collection_id, filename="a.txt", content=b"hello") -> dict:
     response = await upload(client, headers, collection_id, filename, content)
-    assert response.status_code == 201
+    assert response.status_code == 202
     return response.json()
 
 
@@ -443,7 +443,7 @@ async def test_deleted_document_can_be_uploaded_again(client, alice) -> None:
     doc = await _uploaded(client, alice, collection_id, "a.txt", b"same")
     await client.delete(f"/documents/{doc['id']}", headers=alice)
 
-    assert (await upload(client, alice, collection_id, "a.txt", b"same")).status_code == 201
+    assert (await upload(client, alice, collection_id, "a.txt", b"same")).status_code == 202
 
 
 # ---------- auth ----------
@@ -553,3 +553,16 @@ async def test_other_user_cannot_delete_collection_or_its_files(
 
     assert response.status_code == 404
     assert len(files_on_disk(storage_dir)) == 1
+
+
+async def test_document_shows_job_status_fields(client):
+    headers = await auth_headers(client, "status@example.com")
+    collection_id = await create_collection(client, headers)
+    doc_id = (await upload(client, headers, collection_id, "a.txt", b"hello there")).json()["id"]
+
+    body = (await client.get(f"/documents/{doc_id}", headers=headers)).json()
+    assert body["status"] == "pending"
+    assert body["attempts"] == 0
+    for field in ("queued_at", "processing_started_at", "heartbeat_at", "finished_at"):
+        assert field in body
+    assert "storage_key" not in body and "processing_run_id" not in body

@@ -13,18 +13,20 @@ def make(**overrides) -> Settings:
 def test_default_budgets_follow_the_documented_limits():
     settings = make()
     assert settings.embedding_token_budget == 5000  # 10,000 x 0.5
-    assert settings.embedding_request_budget == 2  # one below the limit of 3
+    assert settings.embedding_request_budget == 3  # the account's limit, shared by all
+    assert settings.embedding_ingest_request_budget == 2  # 3 x 0.67, rounded down
     assert settings.embedding_query_reserve_tokens == 250  # 5%
     assert settings.embedding_document_token_budget == 4750
     assert settings.embedding_min_retry_wait == 20  # 60 s / 3 requests
-    assert settings.embedding_query_reserve_requests == 1
+    assert settings.embedding_query_reserve_requests == 1  # kept free for searches
     assert settings.EMBEDDING_MAX_RETRIES == 6
 
 
 def test_safety_factor_applies_to_tokens_only():
     settings = make(EMBEDDING_RATE_SAFETY=0.2, EMBEDDING_RPM_LIMIT=10)
     assert settings.embedding_token_budget == 2000
-    assert settings.embedding_request_budget == 9  # not 10 x 0.2
+    assert settings.embedding_request_budget == 10  # not 10 x 0.2
+    assert settings.embedding_ingest_request_budget == 6  # 10 x 0.67
 
 
 def test_min_retry_wait_can_be_set_explicitly():
@@ -39,9 +41,18 @@ def test_empty_min_retry_wait_in_env_file_means_computed(tmp_path):
     assert settings.embedding_min_retry_wait == 20
 
 
+def test_job_settings_defaults():
+    settings = make()
+    assert settings.MAX_JOB_ATTEMPTS == 4
+    assert settings.SWEEP_PENDING_MINUTES == 3
+    assert settings.STALE_PROCESSING_MINUTES == 10
+    assert settings.EMBEDDING_INGEST_RPM_SHARE == 0.67
+
+
 def test_request_budget_is_never_below_one():
     settings = make(EMBEDDING_RPM_LIMIT=1)
     assert settings.embedding_request_budget == 1
+    assert settings.embedding_ingest_request_budget == 1
     assert settings.embedding_query_reserve_requests == 0  # nothing to spare
 
 

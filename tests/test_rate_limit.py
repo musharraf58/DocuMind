@@ -1,6 +1,7 @@
 import asyncio
 import random
 
+import fakeredis
 import pytest
 
 from app.services.embeddings.errors import EmbeddingBusyError, RequestTooLargeError
@@ -9,32 +10,43 @@ from app.services.embeddings.rate_limit import (
     SlidingWindowRateLimiter,
     estimate_seconds,
 )
+from app.services.embeddings.redis_rate_limit import RedisRateLimiter
 from tests.embedding_fakes import FakeClock
 
 PAD = WAKE_PADDING_SECONDS
 
 
-def make(clock: FakeClock, tokens=8000, requests=2, reserve_tokens=0, reserve_requests=0):
-    return SlidingWindowRateLimiter(
-        token_budget=tokens,
-        request_budget=requests,
-        query_reserve_tokens=reserve_tokens,
-        query_reserve_requests=reserve_requests,
-        clock=clock.clock,
-        sleep=clock.sleep,
-    )
+@pytest.fixture(params=["memory", "redis"])
+def make(request):
+    """Builds a limiter. Every test that uses this runs twice: against the
+    in-memory log and against the Redis one, which must behave identically."""
+
+    def build(clock: FakeClock, tokens=8000, requests=2, reserve_tokens=0, reserve_requests=0):
+        budgets = {
+            "token_budget": tokens,
+            "request_budget": requests,
+            "query_reserve_tokens": reserve_tokens,
+            "query_reserve_requests": reserve_requests,
+            "clock": clock.clock,
+            "sleep": clock.sleep,
+        }
+        if request.param == "memory":
+            return SlidingWindowRateLimiter(**budgets)
+        return RedisRateLimiter(fakeredis.aioredis.FakeRedis(), **budgets)
+
+    return build
 
 
-async def test_requests_within_budget_go_through_without_waiting():
+async def test_requests_within_budget_go_through_without_waiting(make):
     clock = FakeClock()
     limiter = make(clock)
     assert (await limiter.acquire(3000)).waited == 0
     assert (await limiter.acquire(3000)).waited == 0
     assert clock.sleeps == []
-    assert limiter.usage() == (2, 6000)
+    assert (await limiter.usage()) == (2, 6000)
 
 
-async def test_request_budget_makes_the_third_request_wait_for_the_first_to_expire():
+async def test_request_budget_makes_the_third_request_wait_for_the_first_to_expire(make):
     clock = FakeClock()
     limiter = make(clock, requests=2)
     start = clock.now
@@ -45,10 +57,10 @@ async def test_request_budget_makes_the_third_request_wait_for_the_first_to_expi
     waited = (await limiter.acquire(10)).waited  # must wait until the first leaves (t = 60)
     assert clock.now == pytest.approx(start + 60 + PAD)
     assert waited == pytest.approx(55 + PAD)
-    assert limiter.usage() == (2, 20)
+    assert (await limiter.usage()) == (2, 20)
 
 
-async def test_token_budget_waits_only_until_enough_old_tokens_expire():
+async def test_token_budget_waits_only_until_enough_old_tokens_expire(make):
     clock = FakeClock()
     limiter = make(clock, tokens=8000, requests=10)
     start = clock.now
@@ -64,16 +76,16 @@ async def test_token_budget_waits_only_until_enough_old_tokens_expire():
     assert clock.now == pytest.approx(start + 70 + PAD)
 
 
-async def test_a_request_that_could_never_fit_fails_at_once():
+async def test_a_request_that_could_never_fit_fails_at_once(make):
     clock = FakeClock()
     limiter = make(clock, tokens=8000)
     with pytest.raises(RequestTooLargeError, match="9000 tokens; at most 8000"):
         await limiter.acquire(9000)
     assert clock.sleeps == []
-    assert limiter.usage() == (0, 0)
+    assert (await limiter.usage()) == (0, 0)
 
 
-async def test_documents_leave_room_for_queries():
+async def test_documents_leave_room_for_queries(make):
     clock = FakeClock()
     limiter = make(clock, tokens=8000, requests=2, reserve_tokens=400, reserve_requests=1)
     assert limiter.max_tokens("document") == 7600
@@ -89,14 +101,14 @@ async def test_documents_leave_room_for_queries():
     assert clock.now >= start + 60
 
 
-async def test_document_larger_than_its_share_is_too_large_but_a_query_is_not():
+async def test_document_larger_than_its_share_is_too_large_but_a_query_is_not(make):
     limiter = make(FakeClock(), tokens=8000, reserve_tokens=400)
     with pytest.raises(RequestTooLargeError):
         await limiter.acquire(7700, kind="document")
     await limiter.acquire(7700, kind="query")
 
 
-async def test_query_waits_when_the_wait_is_short_enough():
+async def test_query_waits_when_the_wait_is_short_enough(make):
     clock = FakeClock()
     limiter = make(clock, requests=1)
     await limiter.acquire(10)
@@ -106,7 +118,7 @@ async def test_query_waits_when_the_wait_is_short_enough():
     assert waited == pytest.approx(15 + PAD)
 
 
-async def test_query_fails_fast_when_the_wait_is_too_long():
+async def test_query_fails_fast_when_the_wait_is_too_long(make):
     clock = FakeClock()
     limiter = make(clock, requests=1)
     await limiter.acquire(10)
@@ -118,14 +130,14 @@ async def test_query_fails_fast_when_the_wait_is_too_long():
     assert info.value.retry_after == pytest.approx(55)
     assert "retry in about 55 seconds" in str(info.value)
     assert clock.now == before and clock.sleeps == []  # didn't wait
-    assert limiter.usage() == (1, 10)  # and didn't use up a slot
+    assert (await limiter.usage()) == (1, 10)  # and didn't use up a slot
 
 
-async def test_penalty_holds_everyone_until_it_passes():
+async def test_penalty_holds_everyone_until_it_passes(make):
     clock = FakeClock()
     limiter = make(clock)
     start = clock.now
-    limiter.penalize(30)
+    await limiter.penalize(30)
 
     with pytest.raises(EmbeddingBusyError) as info:
         await limiter.acquire(10, kind="query", max_wait=10)
@@ -135,7 +147,7 @@ async def test_penalty_holds_everyone_until_it_passes():
     assert clock.now == pytest.approx(start + 30 + PAD)
 
 
-async def test_waits_in_the_log_do_not_exceed_what_is_needed():
+async def test_waits_in_the_log_do_not_exceed_what_is_needed(make):
     clock = FakeClock()
     limiter = make(clock, tokens=1000, requests=5)
     await limiter.acquire(1000)
@@ -152,7 +164,7 @@ def windows_ok(sent: list[tuple[float, int]], token_budget: int, request_budget:
 
 
 @pytest.mark.parametrize("seed", range(15))
-async def test_no_window_ever_exceeds_the_budget(seed):
+async def test_no_window_ever_exceeds_the_budget(seed, make):
     rng = random.Random(seed)
     token_budget, request_budget = rng.choice([(8000, 2), (500, 3), (100, 1), (3000, 5)])
     clock = FakeClock()
@@ -173,7 +185,7 @@ async def test_no_window_ever_exceeds_the_budget(seed):
     windows_ok(sent, token_budget, request_budget)
 
 
-async def test_concurrent_callers_together_stay_within_budget():
+async def test_concurrent_callers_together_stay_within_budget(make):
     clock = FakeClock()
     limiter = make(clock, tokens=5000, requests=3)
     sent: list[tuple[float, int]] = []
@@ -188,33 +200,33 @@ async def test_concurrent_callers_together_stay_within_budget():
     windows_ok(sent, 5000, 3)
 
 
-async def test_time_until_available_matches_acquire_and_reserves_nothing():
+async def test_time_until_available_matches_acquire_and_reserves_nothing(make):
     clock = FakeClock()
     limiter = make(clock, requests=1)
     await limiter.acquire(10)
     clock.now += 15
 
-    assert limiter.time_until_available(10) == pytest.approx(45)
-    assert limiter.usage() == (1, 10)  # only looked
+    assert await limiter.time_until_available(10) == pytest.approx(45)
+    assert (await limiter.usage()) == (1, 10)  # only looked
     waited = (await limiter.acquire(10)).waited
     assert waited == pytest.approx(45 + PAD)
 
 
-async def test_correcting_a_reservation_raises_but_never_lowers_its_tokens():
+async def test_correcting_a_reservation_raises_but_never_lowers_its_tokens(make):
     clock = FakeClock()
     limiter = make(clock, tokens=1000, requests=10)
     reservation = await limiter.acquire(400)
-    reservation.correct(700)  # the provider counted more than we estimated
-    assert limiter.usage() == (1, 700)
-    reservation.correct(0)  # no count reported
-    reservation.correct(500)  # or a smaller one
-    assert limiter.usage() == (1, 700)
+    await reservation.correct(700)  # the provider counted more than we estimated
+    assert (await limiter.usage()) == (1, 700)
+    await reservation.correct(0)  # no count reported
+    await reservation.correct(500)  # or a smaller one
+    assert (await limiter.usage()) == (1, 700)
 
 
-async def test_corrected_count_makes_the_next_request_wait():
+async def test_corrected_count_makes_the_next_request_wait(make):
     clock = FakeClock()
     limiter = make(clock, tokens=1000, requests=10)
-    (await limiter.acquire(500)).correct(900)
+    await (await limiter.acquire(500)).correct(900)
     # By our estimate 500 + 400 would fit; by the provider's count it doesn't.
     start = clock.now
     await limiter.acquire(400)

@@ -12,7 +12,7 @@ from app.services import search as search_service
 from app.services.embeddings import EmbeddingBusyError, EmbeddingError
 from app.services.search import build_search_query
 from tests.embedding_fakes import FakeClock, KeywordProvider, limited_provider
-from tests.helpers import auth_headers, create_collection, upload
+from tests.helpers import auth_headers, create_collection, run_queued_jobs, upload
 
 KEYWORDS = ["cats", "databases", "cooking", "rockets"]
 HNSW_INDEX = "ix_chunks_embedding_hnsw"
@@ -28,10 +28,10 @@ def keywords(client):
 
 async def add_document(client, headers, collection_id, name, content: str) -> str:
     response = await upload(client, headers, collection_id, name, content.encode())
-    assert response.status_code == 201, response.text
+    assert response.status_code == 202, response.text
     doc_id = response.json()["id"]
-    processed = await client.post(f"/documents/{doc_id}/process", headers=headers)
-    assert processed.json()["status"] == "ready", processed.json()
+    [result] = await run_queued_jobs()
+    assert result.outcome == "ready", result
     return doc_id
 
 

@@ -1,80 +1,36 @@
-"""Turn a stored document into searchable chunks: extract text, chunk it,
-embed the chunks, save them.
+"""The processing pipeline for one document: read the stored file, extract
+and chunk the text, embed the chunks, and save them.
 
-Temporary: called directly from the request (POST /documents/{id}/process).
-Phase 5 moves this to a background queue.
+Run by the background job (app/services/jobs.py), which claims the document
+first and decides what to do when this raises.
 """
 
 import logging
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
 
 import anyio
-from fastapi import HTTPException
-from sqlalchemy import delete, insert, or_, update
+from sqlalchemy import delete, insert, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import clock
 from app.core.config import Settings, get_settings
 from app.models import Chunk, Document, DocumentStatus
 from app.services.chunking import ChunkData, chunk_segments
-from app.services.embeddings import EmbeddingError, EmbeddingProvider, Vector
+from app.services.embeddings import EmbeddingProvider, Vector
 from app.services.extraction import ExtractionError, ExtractionLimits, extract
 from app.services.storage import StorageBackend
 
 logger = logging.getLogger(__name__)
 
-# A "processing" claim older than this is treated as abandoned (the server
-# restarted or crashed mid-run) and may be claimed again.
-STALE_PROCESSING_AFTER = timedelta(minutes=10)
-GENERIC_ERROR = "Could not read this file"
-MAX_ERROR_LENGTH = 500
-
 
 class ClaimLostError(Exception):
-    """Another run took this document over (our claim looked abandoned). We
-    must stop: the document is now that run's to finish."""
+    """This run no longer holds the document: it was deleted, or the sweeper
+    decided this run had died and handed the document to a new one. We must
+    stop without writing anything."""
 
 
-def utcnow() -> datetime:
-    """The current time. A function so tests can run a long job on a fake clock."""
-    return datetime.now(UTC)
-
-
-async def claim_for_processing(db: AsyncSession, document: Document) -> uuid.UUID:
-    """Mark the document "processing" and return this run's id, or raise 409 if
-    another run already holds it.
-
-    Check and update happen in a single UPDATE ... WHERE, so two simultaneous
-    requests can't both win: the database lets exactly one of them match.
-    """
-    now = utcnow()
-    run_id = uuid.uuid4()
-    claimed = await db.scalar(
-        update(Document)
-        .where(
-            Document.id == document.id,
-            or_(
-                Document.status != DocumentStatus.processing,
-                Document.processing_started_at.is_(None),
-                Document.processing_started_at < now - STALE_PROCESSING_AFTER,
-            ),
-        )
-        .values(
-            status=DocumentStatus.processing,
-            error_message=None,
-            processing_started_at=now,
-            processing_run_id=run_id,
-        )
-        .returning(Document.id)
-    )
-    await db.commit()
-    if claimed is None:
-        raise HTTPException(status_code=409, detail="Document is already being processed")
-    return run_id
-
-
-def _ours(document_id: uuid.UUID, run_id: uuid.UUID):
+def ours(document_id: uuid.UUID, run_id: uuid.UUID):
     """WHERE clause: this document, and the claim is still this run's."""
     return (Document.id == document_id) & (Document.processing_run_id == run_id)
 
@@ -100,20 +56,18 @@ def _drop_blank(chunks: list[ChunkData]) -> list[ChunkData]:
     return [replace(chunk, chunk_index=i) for i, chunk in enumerate(kept)]
 
 
-async def _heartbeat(db: AsyncSession, document_id: uuid.UUID, run_id: uuid.UUID) -> None:
-    """Show the run is alive. Embedding can take longer than STALE_PROCESSING_AFTER
-    when the provider's rate limit forces long waits, and without this another
-    request would take the document over and process it a second time in
-    parallel. One quick statement, committed immediately: nothing stays open
-    while we then wait.
+async def heartbeat(db: AsyncSession, document_id: uuid.UUID, run_id: uuid.UUID) -> None:
+    """Show the run is alive by refreshing heartbeat_at. The sweeper treats a
+    "processing" document whose heartbeat is old as abandoned. One quick
+    statement, committed immediately: nothing stays open while we then wait.
 
     Raises ClaimLostError if the claim is no longer ours. This runs before
-    every request to the provider, so a run that lost its claim stops before
-    spending any more of the rate limit."""
+    every request to the embedding provider, so a run that lost its claim (or
+    whose document was deleted) stops before spending more of the rate limit."""
     alive = await db.scalar(
         update(Document)
-        .where(_ours(document_id, run_id))
-        .values(processing_started_at=utcnow())
+        .where(ours(document_id, run_id))
+        .values(heartbeat_at=clock.utcnow())
         .returning(Document.id)
         .execution_options(synchronize_session=False)
     )
@@ -122,7 +76,7 @@ async def _heartbeat(db: AsyncSession, document_id: uuid.UUID, run_id: uuid.UUID
         raise ClaimLostError
 
 
-async def _replace_chunks(
+async def replace_chunks(
     db: AsyncSession,
     document: Document,
     run_id: uuid.UUID,
@@ -141,12 +95,13 @@ async def _replace_chunks(
     check and the write."""
     still_ours = await db.scalar(
         update(Document)
-        .where(_ours(document.id, run_id))
+        .where(ours(document.id, run_id))
         .values(
             status=DocumentStatus.ready,
             error_message=None,
-            processing_started_at=None,
             processing_run_id=None,
+            heartbeat_at=None,
+            finished_at=clock.utcnow(),
         )
         .returning(Document.id)
         .execution_options(synchronize_session=False)
@@ -177,83 +132,40 @@ async def _replace_chunks(
     await db.refresh(document)
 
 
-async def _mark_failed(
-    db: AsyncSession, document: Document, document_id: uuid.UUID, run_id: uuid.UUID, message: str
+async def run_pipeline(
+    db: AsyncSession,
+    storage: StorageBackend,
+    embedder: EmbeddingProvider,
+    document: Document,
+    run_id: uuid.UUID,
+    settings: Settings | None = None,
 ) -> None:
-    # The rollback before this expired the document object, and reading an
-    # expired attribute in async code raises, so update by the saved id and
-    # reload explicitly. Only while the claim is ours: if another run took
-    # over, the document's state is that run's to set.
-    await db.execute(
-        update(Document)
-        .where(_ours(document_id, run_id))
-        .values(
-            status=DocumentStatus.failed,
-            error_message=message[:MAX_ERROR_LENGTH],
-            processing_started_at=None,
-            processing_run_id=None,
-        )
-        .execution_options(synchronize_session=False)
-    )
-    await db.commit()
-    await db.refresh(document)
-
-
-async def process_document(
-    db: AsyncSession, storage: StorageBackend, embedder: EmbeddingProvider, document: Document
-) -> Document:
-    """Extract, chunk and embed a document the caller has already proven they own.
-
-    Ends with the document "ready" (chunks and vectors replaced) or "failed"
-    (with a short message for the user, previous chunks and vectors
-    untouched). Raises 409 if another run is processing it, or if another run
-    took it over while this one was waiting (this one then stops, unwritten).
-    """
+    """Process a document this run has claimed. Ends with the document "ready"
+    (chunks and vectors replaced in one transaction). Raises on any failure,
+    leaving the previous chunks and vectors untouched; the caller decides
+    whether that is permanent or worth retrying."""
+    settings = settings or get_settings()
     document_id = document.id
-    settings = get_settings()
-    run_id = await claim_for_processing(db, document)
-    try:
-        data = await _read_file(storage, document.storage_key)
-        # Parsing PDFs and counting tokens is CPU work that would freeze the
-        # event loop (and every other request) if run here directly.
-        chunks = await anyio.to_thread.run_sync(
-            extract_and_chunk, data, document.content_type, settings
-        )
-        chunks = _drop_blank(chunks)
-        # Network calls, rate-limit waits and retries: possibly many minutes.
-        # No database transaction is open meanwhile (the claim was committed and
-        # the heartbeat commits at once), so no locks or connection are held.
-        vectors = await embedder.embed_documents(
-            [chunk.content for chunk in chunks],
-            token_counts=[chunk.token_count for chunk in chunks],
-            heartbeat=lambda: _heartbeat(db, document_id, run_id),
-        )
-        logger.info(
-            "Document %s: embedded %d chunks (%d tokens, model %s)",
-            document_id,
-            len(chunks),
-            sum(chunk.token_count for chunk in chunks),
-            embedder.model,
-        )
-        await _replace_chunks(db, document, run_id, chunks, vectors, embedder.model)
-    except ClaimLostError:
-        await db.rollback()
-        logger.warning(
-            "Document %s: run %s stopped, another run took the document over", document_id, run_id
-        )
-        await db.refresh(document)
-        raise HTTPException(
-            status_code=409, detail="Processing was taken over by another run"
-        ) from None
-    except Exception as exc:
-        await db.rollback()
-        if isinstance(exc, ExtractionError | EmbeddingError):
-            # Both carry messages written to be shown to users.
-            message = str(exc)
-            logger.info("Document %s failed processing: %s", document_id, message)
-        else:
-            # Full details go to the server log only, never to the user.
-            message = GENERIC_ERROR
-            logger.exception("Unexpected error processing document %s", document_id)
-        await _mark_failed(db, document, document_id, run_id, message)
-    return document
+    data = await _read_file(storage, document.storage_key)
+    # Parsing PDFs and counting tokens is CPU work that would freeze the
+    # event loop if run here directly.
+    chunks = await anyio.to_thread.run_sync(
+        extract_and_chunk, data, document.content_type, settings
+    )
+    chunks = _drop_blank(chunks)
+    # Network calls, rate-limit waits and retries: possibly many minutes.
+    # No database transaction is open meanwhile (the claim was committed and
+    # each heartbeat commits at once), so no locks or connection are held.
+    vectors = await embedder.embed_documents(
+        [chunk.content for chunk in chunks],
+        token_counts=[chunk.token_count for chunk in chunks],
+        heartbeat=lambda: heartbeat(db, document_id, run_id),
+    )
+    logger.info(
+        "Document %s: embedded %d chunks (%d tokens, model %s)",
+        document_id,
+        len(chunks),
+        sum(chunk.token_count for chunk in chunks),
+        embedder.model,
+    )
+    await replace_chunks(db, document, run_id, chunks, vectors, embedder.model)

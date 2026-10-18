@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models import Chunk, Document, DocumentStatus
 from app.services.integrity import ready_documents_missing_embeddings, report_missing_embeddings
-from tests.helpers import auth_headers, create_collection, upload
+from tests.helpers import auth_headers, create_collection, run_queued_jobs, upload
 
 TEXT = ("This sentence is long enough to pass the minimum text check. " * 300).encode()
 
@@ -15,7 +15,8 @@ async def processed_document(client, name="notes.txt", email="owner@example.com"
     headers = await auth_headers(client, email)
     collection_id = await create_collection(client, headers)
     doc_id = (await upload(client, headers, collection_id, name, TEXT)).json()["id"]
-    assert (await client.post(f"/documents/{doc_id}/process", headers=headers)).status_code == 200
+    [result] = await run_queued_jobs()
+    assert result.outcome == "ready"
     return uuid.UUID(doc_id)
 
 

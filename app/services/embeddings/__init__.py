@@ -1,6 +1,7 @@
-from functools import lru_cache
+from redis.asyncio import Redis
 
 from app.core.config import get_settings
+from app.core.redis import get_redis
 from app.models.chunk import EMBEDDING_COLUMN_DIMENSIONS
 from app.services.embeddings.base import EmbeddingProvider, Vector
 from app.services.embeddings.errors import (
@@ -10,7 +11,7 @@ from app.services.embeddings.errors import (
     RetryableEmbeddingError,
 )
 from app.services.embeddings.fake import FakeEmbeddingProvider
-from app.services.embeddings.rate_limit import SlidingWindowRateLimiter
+from app.services.embeddings.redis_rate_limit import RedisRateLimiter
 from app.services.embeddings.voyage import VoyageEmbeddingProvider
 
 __all__ = [
@@ -23,26 +24,17 @@ __all__ = [
     "Vector",
     "VoyageEmbeddingProvider",
     "get_embedding_provider",
-    "get_rate_limiter",
-    "reset_rate_limiters",
 ]
 
 FAKE_MODEL_NAME = "fake-sha256"
 
 
-@lru_cache
-def _limiter(
-    token_budget: int, request_budget: int, reserve_tokens: int, reserve_requests: int
-) -> SlidingWindowRateLimiter:
-    return SlidingWindowRateLimiter(token_budget, request_budget, reserve_tokens, reserve_requests)
-
-
-def get_rate_limiter() -> SlidingWindowRateLimiter:
-    """The one limiter for this process. A new provider object is built for
-    every request, but they must all draw on the SAME 60-second log, or each
-    request would believe the whole budget was free."""
+def make_rate_limiter(redis: Redis) -> RedisRateLimiter:
+    """The rate limiter for the embedding account, stored in Redis so that the
+    API (searches) and the worker (ingestion) draw on one shared window."""
     settings = get_settings()
-    return _limiter(
+    return RedisRateLimiter(
+        redis,
         settings.embedding_token_budget,
         settings.embedding_request_budget,
         settings.embedding_query_reserve_tokens,
@@ -50,14 +42,10 @@ def get_rate_limiter() -> SlidingWindowRateLimiter:
     )
 
 
-def reset_rate_limiters() -> None:
-    """Forget what has been sent (for tests)."""
-    _limiter.cache_clear()
-
-
-def get_embedding_provider() -> EmbeddingProvider:
+def get_embedding_provider(redis: Redis | None = None) -> EmbeddingProvider:
     """The provider selected by EMBEDDING_PROVIDER. Also a FastAPI dependency,
-    so tests can swap in their own."""
+    so tests can swap in their own. `redis`: the client for the shared rate
+    limiter (default: this process's shared client)."""
     settings = get_settings()
     if settings.EMBEDDING_DIMENSIONS != EMBEDDING_COLUMN_DIMENSIONS:
         raise EmbeddingError(
@@ -84,6 +72,6 @@ def get_embedding_provider() -> EmbeddingProvider:
     return VoyageEmbeddingProvider(
         api_key=settings.EMBEDDING_API_KEY,
         timeout=settings.EMBEDDING_TIMEOUT_SECONDS,
-        limiter=get_rate_limiter(),
+        limiter=make_rate_limiter(redis if redis is not None else get_redis()),
         **common,
     )

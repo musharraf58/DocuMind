@@ -3,15 +3,16 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
-import pytest
-from fastapi import HTTPException
 from pydantic import SecretStr
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core import clock
+from app.core.config import get_settings
 from app.models import Chunk, Document, DocumentStatus
 from app.services import processing
 from app.services.chunking import ChunkData
+from app.services.documents import queue_for_processing
 from app.services.embeddings import (
     EmbeddingError,
     EmbeddingProvider,
@@ -20,7 +21,7 @@ from app.services.embeddings import (
     VoyageEmbeddingProvider,
 )
 from app.services.embeddings.fake import fake_vector
-from app.services.processing import GENERIC_ERROR, process_document
+from app.services.jobs import GENERIC_ERROR, Outcome, run_job
 from app.services.storage import get_storage
 from tests.embedding_fakes import (
     DIMENSIONS,
@@ -39,13 +40,19 @@ async def uploaded(client, db: AsyncSession, filename: str, content: bytes) -> D
     headers = await auth_headers(client, f"{uuid.uuid4().hex[:8]}@example.com")
     collection_id = await create_collection(client, headers)
     response = await upload(client, headers, collection_id, filename, content)
-    assert response.status_code == 201, response.text
+    assert response.status_code == 202, response.text
     return await db.get(Document, uuid.UUID(response.json()["id"]))
 
 
 async def run(db: AsyncSession, document: Document, embedder: EmbeddingProvider | None = None):
+    """Queue the document (as reprocess does) and run the job on it, as the worker would."""
     embedder = embedder or FakeEmbeddingProvider(model="fake-model", dimensions=DIMENSIONS)
-    return await process_document(db, get_storage(), embedder, document)
+    await db.refresh(document)
+    if document.status != DocumentStatus.pending:
+        await queue_for_processing(db, document)
+    result = await run_job(db, document.id, get_storage(), embedder)
+    await db.refresh(document)
+    return result
 
 
 async def stored_chunks(db: AsyncSession, document: Document) -> list[Chunk]:
@@ -66,7 +73,10 @@ async def test_txt_becomes_ready_with_chunks(client, db):
 
     assert document.status == DocumentStatus.ready
     assert document.error_message is None
-    assert document.processing_started_at is None
+    assert document.attempts == 1
+    assert document.processing_started_at is not None
+    assert document.finished_at >= document.processing_started_at
+    assert document.heartbeat_at is None and document.processing_run_id is None
     chunks = await stored_chunks(db, document)
     assert len(chunks) > 1
     assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
@@ -199,32 +209,23 @@ async def test_failed_document_can_be_processed_again(client, db, monkeypatch):
     assert document.error_message is None
 
 
-async def test_already_processing_is_rejected_with_409(client, db):
+async def test_job_leaves_a_document_another_worker_is_processing_alone(client, db):
     document = await uploaded(client, db, "notes.txt", FILLER.encode())
+    other_run = uuid.uuid4()
     await db.execute(
         update(Document)
         .where(Document.id == document.id)
-        .values(status=DocumentStatus.processing, processing_started_at=datetime.now(UTC))
+        .values(status=DocumentStatus.processing, processing_run_id=other_run)
     )
     await db.commit()
 
-    with pytest.raises(HTTPException) as info:
-        await run(db, document)
-    assert info.value.status_code == 409
-
-
-async def test_abandoned_processing_claim_can_be_taken_over(client, db):
-    document = await uploaded(client, db, "notes.txt", FILLER.encode())
-    long_ago = datetime.now(UTC) - timedelta(hours=1)
-    await db.execute(
-        update(Document)
-        .where(Document.id == document.id)
-        .values(status=DocumentStatus.processing, processing_started_at=long_ago)
+    result = await run_job(
+        db, document.id, get_storage(), FakeEmbeddingProvider(model="m", dimensions=DIMENSIONS)
     )
-    await db.commit()
-
-    await run(db, document)
-    assert document.status == DocumentStatus.ready
+    assert result.outcome == Outcome.skipped
+    await db.refresh(document)
+    assert (document.status, document.processing_run_id) == (DocumentStatus.processing, other_run)
+    assert document.attempts == 0
 
 
 async def test_extraction_runs_off_the_event_loop_thread(client, db, monkeypatch):
@@ -249,47 +250,38 @@ def fake_chunks(count: int, tokens: int) -> list[ChunkData]:
     return [ChunkData(i, f"Chunk number {i}.", None, None, tokens) for i in range(count)]
 
 
-async def test_long_rate_limited_run_completes_and_keeps_its_claim(
+async def test_long_rate_limited_run_keeps_its_heartbeat_fresh(
     client, db, test_engine, monkeypatch
 ):
     # 200 chunks x 500 tokens = 100,000 tokens, at 7,600 per minute: about 13
-    # minutes of simulated time, longer than the 10 minutes after which an
-    # unrefreshed "processing" claim counts as abandoned.
+    # minutes of simulated time, longer than the STALE_PROCESSING_MINUTES (10)
+    # after which the sweeper would treat the document as abandoned.
     monkeypatch.setattr(processing, "chunk_segments", lambda *args: fake_chunks(200, tokens=500))
-    clock = FakeClock()
+    fake = FakeClock()
     real_start = datetime.now(UTC)
-    monkeypatch.setattr(
-        processing, "utcnow", lambda: real_start + timedelta(seconds=clock.now - 1000)
-    )
+    monkeypatch.setattr(clock, "utcnow", lambda: real_start + timedelta(seconds=fake.now - 1000))
     document = await uploaded(client, db, "notes.txt", FILLER.encode())
     other_sessions = async_sessionmaker(test_engine, expire_on_commit=False)
-    probes: list[tuple[timedelta, bool]] = []
+    heartbeat_ages: list[timedelta] = []
 
     class Probe(ScriptedProvider):
         async def _embed_batch(self, texts, input_type):
-            # What a second request would see right now, mid-run, from its own session.
+            # What the sweeper would see right now, mid-run, from its own session.
             async with other_sessions() as other:
                 row = await other.get(Document, document.id)
-                age = processing.utcnow() - row.processing_started_at
-                try:
-                    await processing.claim_for_processing(other, row)
-                    taken_over = True
-                except HTTPException as exc:
-                    assert exc.status_code == 409
-                    taken_over = False
-            probes.append((age, taken_over))
+                heartbeat_ages.append(clock.utcnow() - row.heartbeat_at)
             return await super()._embed_batch(texts, input_type)
 
     provider = limited_provider(
-        clock, reserve_tokens=400, reserve_requests=1, provider_cls=Probe, model="long-run-model"
+        fake, reserve_tokens=400, reserve_requests=1, provider_cls=Probe, model="long-run-model"
     )
     await run(db, document, provider)
 
     assert document.status == DocumentStatus.ready
     assert len(provider.calls) == 14
-    assert clock.now - 1000 > 12 * 60  # really did take longer than the stale limit...
-    assert not any(taken for _, taken in probes)  # ...yet never looked abandoned
-    assert max(age for age, _ in probes) < timedelta(minutes=2)
+    assert fake.now - 1000 > 12 * 60  # really did take longer than the stale limit...
+    stale = timedelta(minutes=get_settings().STALE_PROCESSING_MINUTES)
+    assert max(heartbeat_ages) < min(stale, timedelta(minutes=2))  # ...but never looked it
     stored = await stored_chunks(db, document)
     assert len(stored) == 200
     assert all(c.embedding is not None and c.embedding_model == "long-run-model" for c in stored)
@@ -456,15 +448,22 @@ async def test_provider_failure_keeps_old_chunks_and_vectors_and_hides_key(clien
     assert all(c.embedding_model == "fake-model" for c in await stored_chunks(db, document))
 
 
-async def test_exhausted_retries_fail_with_safe_message(client, db):
+async def test_provider_outage_sends_the_document_back_for_a_later_retry(client, db):
+    # The client's own quick retries run out: a transient failure for the job.
     embedder = ScriptedProvider(
         failures=[RetryableEmbeddingError("Embedding service is unavailable; try again later")] * 5,
         max_retries=2,
     )
     document = await uploaded(client, db, "notes.txt", FILLER.encode())
-    await run(db, document, embedder)
-    assert document.status == DocumentStatus.failed
-    assert document.error_message == "Embedding service is unavailable; try again later"
+    result = await run(db, document, embedder)
+
+    assert result.outcome == Outcome.retry
+    assert result.retry_in == 30  # JOB_RETRY_BASE_SECONDS after the first attempt
+    assert document.status == DocumentStatus.pending
+    assert document.attempts == 1
+    assert document.error_message == (
+        "Attempt 1 of 4 failed: Embedding service is unavailable; try again later"
+    )
 
 
 async def test_reprocessing_replaces_vectors_without_duplicates(client, db):

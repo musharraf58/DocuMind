@@ -5,13 +5,12 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import CurrentUser, DbSession, EmbedderDep, StorageDep
+from app.api.deps import CurrentUser, DbSession, QueueDep, StorageDep
 from app.models import DocumentStatus
 from app.schemas.chunk import ChunkRead
 from app.schemas.document import DocumentRead
 from app.services import collections as collection_service
 from app.services import documents as document_service
-from app.services import processing as processing_service
 
 router = APIRouter(tags=["documents"])
 
@@ -19,7 +18,7 @@ router = APIRouter(tags=["documents"])
 @router.post(
     "/collections/{collection_id}/documents",
     response_model=DocumentRead,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def upload_document(
     collection_id: uuid.UUID,
@@ -27,9 +26,16 @@ async def upload_document(
     db: DbSession,
     user: CurrentUser,
     storage: StorageDep,
+    queue: QueueDep,
 ):
+    """Store the file and queue it for processing. 202: accepted, processing
+    happens in the background; poll GET /documents/{id} for its status."""
     collection = await collection_service.get_owned_collection(db, collection_id, user.id)
-    return await document_service.upload_document(db, storage, collection, file)
+    # upload_document has COMMITTED the "pending" document when it returns, so
+    # a worker that picks the job up immediately is sure to find it.
+    document = await document_service.upload_document(db, storage, collection, file)
+    await queue.enqueue(document.id)  # if this fails, the sweeper enqueues it later
+    return document
 
 
 @router.get("/collections/{collection_id}/documents", response_model=list[DocumentRead])
@@ -90,22 +96,21 @@ async def delete_document(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/documents/{document_id}/process", response_model=DocumentRead)
-async def process_document(
-    document_id: uuid.UUID,
-    db: DbSession,
-    user: CurrentUser,
-    storage: StorageDep,
-    embedder: EmbedderDep,
+@router.post(
+    "/documents/{document_id}/reprocess",
+    response_model=DocumentRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def reprocess_document(
+    document_id: uuid.UUID, db: DbSession, user: CurrentUser, queue: QueueDep
 ):
-    """Extract, chunk and embed the document now, waiting for the result.
-
-    Temporary: Phase 5 replaces this with a background queue. A file that
-    can't be read is not an HTTP error: the response is 200 with status
-    "failed" and an error_message. 409 if it is already being processed.
-    """
+    """Queue the document to be processed again (e.g. after a failure or a
+    model change). 409 if it is already queued or being processed."""
     document = await document_service.get_owned_document(db, document_id, user.id)
-    return await processing_service.process_document(db, storage, embedder, document)
+    if not await document_service.queue_for_processing(db, document):
+        raise HTTPException(status_code=409, detail="Document is already queued or being processed")
+    await queue.enqueue(document.id)
+    return document
 
 
 @router.get("/documents/{document_id}/chunks", response_model=list[ChunkRead])

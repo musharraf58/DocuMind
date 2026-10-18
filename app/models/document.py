@@ -44,11 +44,22 @@ class Document(Base):
         index=True,
     )
     error_message: Mapped[str | None] = mapped_column(Text, default=None)
+    # How many times a worker has started processing this document. Transient
+    # failures are retried until this reaches MAX_JOB_ATTEMPTS.
+    attempts: Mapped[int] = mapped_column(default=0, server_default="0")
+    # When the document last became "pending" (upload, reprocess, retry or
+    # sweeper reset). The sweeper re-enqueues documents pending for too long.
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     # Set when processing is claimed. A "processing" document whose claim is
     # old was abandoned (e.g. the server restarted) and may be claimed again.
     processing_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), default=None
     )
+    # Refreshed by the worker before every embedding request. A "processing"
+    # document whose heartbeat is old belongs to a worker that died.
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    # When processing last ended, in "ready" or "failed".
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     # Identifies the run that holds the "processing" claim. Every write a run
     # makes (heartbeat, final save, failure) requires its own id to still be
     # here, so a run whose claim was taken over can never overwrite the newer
