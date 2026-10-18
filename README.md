@@ -2,8 +2,42 @@
 
 RAG knowledge base API. FastAPI (async), PostgreSQL + pgvector, SQLAlchemy 2.0 async, Redis.
 
-**Status:** Phase 4 (users, JWT auth, per-user collections, document upload and storage,
-text extraction and chunking, embeddings and vector search).
+**Status:** Phase 5 (users, JWT auth, per-user collections, document upload and storage,
+text extraction and chunking, embeddings and vector search, background processing).
+
+## Architecture
+
+```
+                      ┌──────────────────────────── Postgres + pgvector ──────────────────┐
+                      │  documents (status, attempts, timestamps)   chunks (text, vector) │
+                      └──────▲──────────────────────────────────────────────▲────────────┘
+                             │ 1. save "pending", COMMIT                   │ claim, heartbeat,
+                             │                                             │ one transaction → ready
+  client ──HTTP──► API (FastAPI) ──2. enqueue(document id)──►  Redis  ──► Worker (Celery, 1 job
+    ▲                │   ▲                                   │ queue │      at a time)
+    │ 202 + status   │   └── search: embed the query ───────►│ rate- │◄──── ingestion: embed
+    └────────────────┘                                       │ limit │      the chunks
+                                                             │window │      │
+                                                             └───────┘      ▼
+                                                     shared by both    Voyage AI (embeddings)
+                                                                        sweeper (every minute
+                                                                        + at worker start)
+```
+
+- **API** (`app/main.py`): accepts uploads, saves the file and the document as `pending`,
+  commits, and only then puts a job on the queue. It answers `202` at once; clients poll
+  `GET /documents/{id}` for the status.
+- **Redis**: the job queue (Celery broker) and the shared embedding rate-limit window, so
+  the API's searches and the worker's ingestion never exceed the account's limits together.
+- **Worker** (`app/workers/`): one Celery process, one job at a time. A job claims the
+  document (`pending` → `processing`), extracts, chunks and embeds it, refreshing a heartbeat
+  as it goes, and saves the chunks in one transaction (`ready`). Transient failures are
+  retried with a growing delay; permanent ones fail at once.
+- **Sweeper** (runs in the worker every minute, and once at startup): re-enqueues documents
+  pending too long (say the upload happened while Redis was down) and resets documents whose
+  worker died mid-job (stale heartbeat), so nothing is ever stuck.
+- **Postgres** holds the truth: the queue may lose or repeat a message; the database state
+  decides what actually happens.
 
 ## Prerequisites
 
@@ -23,10 +57,11 @@ uv sync                       # create .venv and install deps (incl. dev)
 ## Run everything in Docker
 
 ```bash
-docker compose up --build -d  # api + postgres + redis; api runs migrations on start
-docker compose ps             # all three should become "healthy"
-curl localhost:8000/health    # {"status":"ok","database":"ok"}
-docker compose logs -f api    # follow logs
+docker compose up --build -d  # api + worker + postgres + redis; api runs migrations on start
+docker compose ps             # api, postgres and redis "healthy", worker "running"
+curl localhost:8000/health    # {"status":"ok","database":"ok","redis":"ok"}
+docker compose logs -f api    # follow the API's logs
+docker compose logs -f worker # follow processing: jobs, embedding progress, sweeper
 docker compose down           # stop (data kept in the postgres_data volume)
 docker compose down -v        # stop AND delete the database volume
 ```
@@ -38,7 +73,13 @@ docker compose up -d postgres redis
 uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 curl localhost:8000/health
+
+# In a second terminal: the worker, so uploaded documents get processed.
+uv run celery -A app.workers.celery_app worker --beat --concurrency=1 --loglevel=INFO
 ```
+
+Run only **one** worker. Celery beat (`--beat`) runs the sweeper, and two workers would run
+it twice. To scale out, move beat to its own process first.
 
 ## Using the API
 
@@ -69,13 +110,14 @@ A collection that belongs to someone else returns 404, the same as one that does
 
 Upload files into one of your collections, then list, fetch, download or delete them.
 Allowed types: `.pdf`, `.docx`, `.md`, `.txt` (the content is checked, not just the
-extension). Max size is `MAX_UPLOAD_MB` (default 20). New documents start as `pending`.
+extension). Max size is `MAX_UPLOAD_MB` (default 20). New documents start as `pending` and
+are processed in the background (see "Processing" below).
 
 | Method | Path | What it does |
 |---|---|---|
-| POST | `/collections/{id}/documents` | Upload (multipart field `file`). 201 with the document |
+| POST | `/collections/{id}/documents` | Upload (multipart field `file`). `202` with the document (`pending`) |
 | GET | `/collections/{id}/documents` | List. `?limit=&offset=&status=pending\|processing\|ready\|failed` |
-| GET | `/documents/{id}` | Metadata for one document |
+| GET | `/documents/{id}` | One document: `status`, `attempts`, `error_message`, `queued_at`, `processing_started_at`, `heartbeat_at`, `finished_at` |
 | GET | `/documents/{id}/download` | The file itself (always as an attachment) |
 | DELETE | `/documents/{id}` | Delete the document and its stored file |
 
@@ -102,19 +144,21 @@ searched by meaning (see "Embeddings and search" below).
 
 | Method | Path | What it does |
 |---|---|---|
-| POST | `/documents/{id}/process` | Extract, chunk and embed now, and return the document when done |
+| POST | `/documents/{id}/reprocess` | Queue the document again. `202`; `409` if it is already `pending` or `processing` |
 | GET | `/documents/{id}/chunks` | The chunks, in order. `?limit=&offset=` |
 
+Processing happens in the background worker. Upload, then poll the status:
+
 ```bash
-curl -X POST localhost:8000/documents/$DOC_ID/process -H "Authorization: Bearer $TOKEN"
+curl localhost:8000/documents/$DOC_ID -H "Authorization: Bearer $TOKEN"   # pending → processing → ready
 curl "localhost:8000/documents/$DOC_ID/chunks?limit=5" -H "Authorization: Bearer $TOKEN"
+curl -X POST localhost:8000/documents/$DOC_ID/reprocess -H "Authorization: Bearer $TOKEN"
 ```
 
 How it works:
 
-1. The document is marked `processing`. If another run is already processing it, you get
-   `409`. A claim older than 10 minutes counts as abandoned (say the server restarted)
-   and can be taken over.
+1. The worker claims the document: `pending` → `processing`, `attempts` + 1. Only a
+   `pending` document can be claimed, so a job delivered twice runs once.
 2. Text is extracted in a worker thread: PDF page by page (chunks get a `page_number`),
    DOCX paragraphs and tables (headings become `section_title`), Markdown sections
    (`#` headings become `section_title`), plain text as is. The text is then cleaned
@@ -127,9 +171,26 @@ How it works:
 5. In a single transaction, the old chunks are deleted, the new ones inserted with their
    vectors, and the document marked `ready`.
 
-If anything fails, the document becomes `failed` with a short `error_message` and its
-previous chunks (and their vectors) are kept. That's still a `200` response: the request worked, the file
-didn't. You can process `ready` and `failed` documents again at any time.
+If anything fails, the previous chunks (and their vectors) are kept, and:
+
+- **Permanent** problems (scanned or corrupt file, unsupported type, over a limit, invalid
+  API key): `failed` at once, with a short `error_message`. Retrying wouldn't change it.
+- **Transient** problems (rate limit, provider outage, timeout, database or Redis blip):
+  back to `pending` with `error_message` saying which attempt failed, and retried after
+  30 s, 60 s, 120 s... Once `attempts` reaches `MAX_JOB_ATTEMPTS` the document is `failed`.
+
+You can reprocess `ready` and `failed` documents at any time. A document deleted while it is
+being processed is left alone: the job notices at its next step, stops, and writes nothing.
+
+Background job settings:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `MAX_JOB_ATTEMPTS` | 4 | Tries per document for transient failures |
+| `JOB_RETRY_BASE_SECONDS` | 30 | First retry delay; doubles each time |
+| `JOB_TIMEOUT_MINUTES` | 120 | Longest one job may run (a very large document takes ~1-2 hours at 10,000 tokens/minute) |
+| `SWEEP_PENDING_MINUTES` | 3 | The sweeper re-enqueues documents pending longer than this |
+| `STALE_PROCESSING_MINUTES` | 10 | ...and resets processing documents with no heartbeat for this long |
 
 Deleting a document or collection deletes its chunks too.
 
@@ -147,13 +208,12 @@ Settings (see `.env.example`):
 
 Known limitations:
 
-- `POST /process` waits for processing to finish, which with embedding rate limits can take
-  minutes. Phase 5 moves it to a background queue.
 - No OCR: scanned PDFs fail with "No readable text found".
 - PDFs that need a password, or use AES encryption, fail.
 - DOCX headers, footers, footnotes and comments are not extracted.
-- Extraction has no time limit (a running thread can't be stopped). The size limits keep the
-  work bounded, and the Phase 5 worker will add a real timeout.
+- Each job has a time limit (`JOB_TIMEOUT_MINUTES`), but extraction itself runs in a thread,
+  which can't be interrupted: a pathological file is bounded by the size limits and, as a
+  last resort, by the worker's hard time limit.
 - tiktoken downloads its vocabulary (a few MB) the first time it runs locally. The Docker
   image includes it at build time.
 
@@ -189,6 +249,7 @@ Choose the provider with `EMBEDDING_PROVIDER`:
 | `EMBEDDING_RETRY_MAX_SECONDS` | 60 | Longest backoff wait |
 | `EMBEDDING_MIN_RETRY_WAIT_SECONDS` | 60 / RPM limit | Shortest wait after a 429 (20 s at 3 requests per minute) |
 | `EMBEDDING_QUERY_MAX_WAIT_SECONDS` | 20 | Longest a search waits for embedding capacity |
+| `EMBEDDING_INGEST_RPM_SHARE` | 0.67 | Share of requests per minute background ingestion may use (2 of 3); the rest is kept for searches |
 
 A bad key or invalid input fails at once without retrying.
 
@@ -197,17 +258,17 @@ A bad key or invalid input fails at once without retrying.
 Embedding providers cap tokens and requests per minute. DocuMind stays under your limits
 instead of finding them out from errors:
 
-- **Budgets.** With the defaults it uses at most 5,000 tokens (10,000 x 0.5) and 2 requests
-  (one below the limit of 3) in any rolling 60 seconds. The safety factor applies to tokens
-  only: our tiktoken count can undercount the provider's (a different tokenizer, plus the
-  retrieval prompt it adds to every text), while requests are counted exactly. A
+- **Budgets.** With the defaults it uses at most 5,000 tokens (10,000 x 0.5) and 3 requests
+  in any rolling 60 seconds, for the API and the worker together. The safety factor applies
+  to tokens only: our tiktoken count can undercount the provider's (a different tokenizer,
+  plus the retrieval prompt it adds to every text), while requests are counted exactly. A
   sliding-window limiter keeps a log of what was sent in the last minute and, before every
   attempt, including retries and failed ones, waits until both budgets have room.
 - **Batches are sized by tokens.** A batch ends when the next chunk would push it over the
   token budget (or `EMBEDDING_BATCH_SIZE`). One request bigger than the per-minute allowance
   could never succeed, however often it was retried, which is why batches are kept below it.
-- **Room for searches.** Document batches use at most 95% of the token budget (4,750 tokens)
-  and leave one request per minute free, so searches can still run during a long embedding.
+- **Room for searches.** Ingestion uses at most `EMBEDDING_INGEST_RPM_SHARE` of the requests
+  (2 of 3) and 95% of the tokens (4,750), so uploads can never starve interactive searches.
 - **429 responses.** Retrying within seconds only uses up more of the per-minute allowance,
   so after a 429 the wait is at least `Retry-After` (when sent) and at least
   `EMBEDDING_MIN_RETRY_WAIT_SECONDS`, doubling on each further 429 up to
@@ -230,28 +291,25 @@ the real wait, including time spent waiting for the rate-limit window, and every
 request logs its HTTP status and `Retry-After` header. Higher plan limits mean faster
 runs: raise `EMBEDDING_TPM_LIMIT` and `EMBEDDING_RPM_LIMIT`.
 
-`POST /documents/{id}/process` stays open for the whole run. Long runs are fine for the
-server (the document's `processing` claim is refreshed with every attempt, and nothing else
-is held), but a browser or proxy may give up on a request that lasts minutes. Phase 5's
-background queue fixes that.
+Long runs happen in the worker, not in an HTTP request: the worker refreshes the document's
+`heartbeat_at` before every embedding request, so the sweeper can tell a slow job from a
+dead one.
 
-**One run per document.** Calling `process` again while a run is going returns `409`. A run
-counts as abandoned only if it hasn't refreshed its claim for 10 minutes, and then another
-call may take over. Each claim carries a run id, and every write a run makes needs that id
-to still be on the document. So a run that was taken over stops before its next request to
-the provider (its own call gets `409 Processing was taken over by another run`), and it
-never writes chunks or marks the document failed.
+**One run per document.** `reprocess` returns `409` while a document is pending or being
+processed, and the worker only claims `pending` documents. A run counts as abandoned only if
+its heartbeat is older than `STALE_PROCESSING_MINUTES`; the sweeper then resets the document
+for a new run. Each claim carries a run id, and every write a run makes needs that id to
+still be on the document, so a run that was replaced stops before its next request to the
+provider and never writes chunks or marks the document failed.
 
 **Searches never hang.** A search waits at most `EMBEDDING_QUERY_MAX_WAIT_SECONDS` for
 embedding capacity. If it would have to wait longer, it answers `503` with a `Retry-After`
 header and `Embedding service is busy; retry in about N seconds`.
 
-**One process only.** The limiter's log lives in the memory of the API process. Run a single
-worker (as the Dockerfile and `uvicorn app.main:app` do). With several processes, each would
-spend the whole budget on its own, and together they would exceed your limits. Scaling out
-needs the log in shared storage: Redis, which is already part of the stack, with the check
-and the record done as one atomic step; or a single worker process that does all the
-embedding (Phase 5's queue with concurrency 1).
+**Shared across processes.** The limiter's log lives in Redis, and every check-and-record is
+one Lua script, which Redis runs as a single indivisible step. So the API (searches) and the
+worker (ingestion) can never both take the last slot, and adding processes doesn't multiply
+the budget. If Redis is unreachable, searches answer `503` and jobs retry later.
 
 **Changing the model or dimensions** is a migration, not just a setting. The column
 holds vectors of exactly one size, and vectors from different models can't be compared.
