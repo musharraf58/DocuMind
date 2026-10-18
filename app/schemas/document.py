@@ -20,4 +20,9 @@ class DocumentRead(BaseModel):
     content_hash: str
     status: DocumentStatus
     error_message: str | None
+    attempts: int
     created_at: datetime
+    queued_at: datetime | None
+    processing_started_at: datetime | None
+    heartbeat_at: datetime | None
+    finished_at: datetime | None

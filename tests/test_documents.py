@@ -553,3 +553,16 @@ async def test_other_user_cannot_delete_collection_or_its_files(
 
     assert response.status_code == 404
     assert len(files_on_disk(storage_dir)) == 1
+
+
+async def test_document_shows_job_status_fields(client):
+    headers = await auth_headers(client, "status@example.com")
+    collection_id = await create_collection(client, headers)
+    doc_id = (await upload(client, headers, collection_id, "a.txt", b"hello there")).json()["id"]
+
+    body = (await client.get(f"/documents/{doc_id}", headers=headers)).json()
+    assert body["status"] == "pending"
+    assert body["attempts"] == 0
+    for field in ("queued_at", "processing_started_at", "heartbeat_at", "finished_at"):
+        assert field in body
+    assert "storage_key" not in body and "processing_run_id" not in body
