@@ -2,8 +2,9 @@
 
 RAG knowledge base API. FastAPI (async), PostgreSQL + pgvector, SQLAlchemy 2.0 async, Redis.
 
-**Status:** Phase 5 (users, JWT auth, per-user collections, document upload and storage,
-text extraction and chunking, embeddings and vector search, background processing).
+**Status:** Phase 6 (users, JWT auth, per-user collections, document upload and storage,
+text extraction and chunking, embeddings and vector search, background processing,
+question answering with citations).
 
 ## Architecture
 
@@ -36,6 +37,8 @@ text extraction and chunking, embeddings and vector search, background processin
 - **Sweeper** (runs in the worker every minute, and once at startup): re-enqueues documents
   pending too long (say the upload happened while Redis was down) and resets documents whose
   worker died mid-job (stale heartbeat), so nothing is ever stuck.
+- **Gemini** (`app/services/llm/`) writes answers to questions from the retrieved chunks,
+  called by the API with its own Redis rate limit (see "Asking questions").
 - **Postgres** holds the truth: the queue may lose or repeat a message; the database state
   decides what actually happens.
 
@@ -302,9 +305,10 @@ for a new run. Each claim carries a run id, and every write a run makes needs th
 still be on the document, so a run that was replaced stops before its next request to the
 provider and never writes chunks or marks the document failed.
 
-**Searches never hang.** A search waits at most `EMBEDDING_QUERY_MAX_WAIT_SECONDS` for
-embedding capacity. If it would have to wait longer, it answers `503` with a `Retry-After`
-header and `Embedding service is busy; retry in about N seconds`.
+**Searches never hang.** A search or question waits at most
+`EMBEDDING_QUERY_MAX_WAIT_SECONDS` for embedding capacity. If it would have to wait longer,
+it answers `429` with a `Retry-After` header and `Embedding service is busy; retry in about
+N seconds`.
 
 **Shared across processes.** The limiter's log lives in Redis, and every check-and-record is
 one Lua script, which Redis runs as a single indivisible step. So the API (searches) and the
@@ -315,7 +319,7 @@ the budget. If Redis is unreachable, searches answer `503` and jobs retry later.
 holds vectors of exactly one size, and vectors from different models can't be compared.
 See the comment in `alembic/versions/0005_chunk_embeddings.py` for the steps.
 
-### Temporary search endpoint
+### Search (debugging view)
 
 | Method | Path | What it does |
 |---|---|---|
@@ -324,16 +328,121 @@ See the comment in `alembic/versions/0005_chunk_embeddings.py` for the steps.
 Body: `{"query": "...", "limit": 5}`. The query is 1-2000 characters; `limit` is 1-20
 (default 5). Each result has `content`, `distance` (cosine distance: smaller means more
 similar), `document_name`, `page_number` and `section_title`. Collections you don't own
-return `404`. If the embedding provider is unavailable, you get `503`.
+return `404`. If the shared embedding quota is used up you get `429` (with `Retry-After`);
+if the embedding provider is unavailable, `503`.
 
 ```bash
 curl -X POST localhost:8000/collections/$COLLECTION_ID/search -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"query": "how do I run the tests?", "limit": 3}'
 ```
 
-This endpoint is temporary; Phase 6 replaces it with the real retrieval service. Search
-only covers chunks embedded with the current `EMBEDDING_MODEL`. Documents processed before
-Phase 4 (no vectors yet), or with a different model, need to be processed again.
+It shows what retrieval finds for a query, with distances, without generating an answer:
+useful to see why a question was or wasn't answered. `/ask` (below) uses the same
+retrieval. Search only covers chunks embedded with the current `EMBEDDING_MODEL`. Documents
+processed before Phase 4 (no vectors yet), or with a different model, need to be processed
+again.
+
+## Asking questions
+
+| Method | Path | What it does |
+|---|---|---|
+| POST | `/collections/{id}/ask` | Answer a question from your documents, with citations |
+
+```bash
+curl -X POST localhost:8000/collections/$COLLECTION_ID/ask -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"question": "How long do refunds take?"}'
+```
+
+```json
+{
+  "answer": "Refunds are processed within 30 days [1].",
+  "grounded": true,
+  "citations": [
+    {"number": 1, "document_id": "...", "document_name": "policy.pdf", "page_number": 3,
+     "section_title": null, "snippet": "Refunds are processed within ...", "distance": 0.21}
+  ],
+  "usage": {"prompt_tokens": 1834, "completion_tokens": 41}
+}
+```
+
+`grounded` is `true` only when the answer cites at least one of the sources it was given.
+`citations` lists only those cited sources; `[n]` in the answer matches `number`.
+
+### How a question flows through the system
+
+```
+question
+  │ 1. validate: empty, or longer than ASK_MAX_QUESTION_CHARS → 422 (nothing embedded)
+  │ 2. ownership: not your collection → 404
+  ▼
+retrieval (app/services/retrieval.py)
+  │ 3. embed the question (Voyage, through the shared rate limiter)
+  │ 4. the RAG_TOP_K nearest chunks, owner + collection filters inside the SQL
+  │ 5. drop chunks farther than RAG_MAX_DISTANCE
+  │      nothing left → "I could not find this in your documents", grounded=false,
+  │                     and the LLM is NOT called
+  ▼
+context + prompt (context.py, prompts.py)
+  │ 6. number the chunks [1], [2], ... best first, until RAG_CONTEXT_TOKEN_BUDGET
+  │ 7. system message = rules only; user message = <sources>...</sources> + <question>
+  ▼
+LLM (app/services/llm/, Gemini)
+  │ 8. generate (Redis rate limit LLM_RPM_LIMIT/min, timeout, retries for transient errors)
+  ▼
+citations (citations.py)
+  │ 9. keep [n] that match a supplied source, remove the others; none valid → grounded=false
+  ▼
+response {answer, grounded, citations, usage}; one log line with counts and token usage
+(never the question or document text)
+```
+
+**Why skip the LLM when nothing is relevant?** Asked to answer from nothing, a model
+guesses, and a guess presented as an answer is worse than "I don't know". Skipping it also
+costs nothing and spends none of the daily quota.
+
+**Prompt injection.** Document text is untrusted: a file can contain "ignore previous
+instructions...". So document text only ever appears inside the `<sources>` block, the
+rules tell the model that block is data and never instructions, and anything in a document
+that looks like our tags is defused so it can't close the block early. This reduces the
+risk; it can't remove it, because the model still reads the text and may be persuaded.
+Answers are therefore treated as untrusted output too: citations are validated, and
+nothing the model says is executed.
+
+**The relevance threshold is provisional.** `RAG_MAX_DISTANCE=0.72` is a starting guess.
+Distances depend on the embedding model and on your documents; Phase 8 tunes it against
+an evaluation set of questions with known answers. Use `/search` to see the distances
+your questions actually get.
+
+Errors: `422` invalid question; `404` not your collection; `429` (with `Retry-After`) when
+the embedding or answer quota is used up, including Gemini's daily limit (which resets at
+midnight Pacific time); `503` when a provider is down, times out or is misconfigured. Error
+bodies are short fixed messages, never provider responses or keys.
+
+### The answer model (Gemini)
+
+Set `LLM_PROVIDER=gemini` and `LLM_API_KEY` (from Google AI Studio). Settings:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `LLM_PROVIDER` | `gemini` | `gemini`, or `fake` for scripted answers without network |
+| `LLM_MODEL` | `gemini-3.5-flash-lite` | Stable, available on the free tier |
+| `LLM_API_KEY` | (empty) | Sent in the `x-goog-api-key` header; never logged |
+| `LLM_MAX_OUTPUT_TOKENS` | 600 | Answer length limit, including the model's thinking tokens |
+| `LLM_TIMEOUT_SECONDS` | 30 | Per request |
+| `LLM_RPM_LIMIT` | 10 | Requests per minute (shared through Redis) |
+| `LLM_TEMPERATURE` | 1.0 | Google recommends 1.0 for Gemini 3 models; lower can cause looping |
+| `RAG_TOP_K` | 8 | Chunks retrieved per question |
+| `RAG_MAX_DISTANCE` | 0.72 | Relevance cut-off (provisional) |
+| `RAG_CONTEXT_TOKEN_BUDGET` | 3000 | Source text per question (approximate tokens) |
+| `ASK_MAX_QUESTION_CHARS` | 1000 | Longest question accepted |
+
+**Free-tier limits** are no longer published by Google; see your project's page in AI
+Studio. An independent measurement found 15 requests per minute and 500 per day for this
+model, so `LLM_RPM_LIMIT` defaults to 10. Daily quotas reset at midnight Pacific time.
+
+**Privacy on the free tier:** Google may use what you send on the free tier, which includes
+excerpts of your documents, to improve its products. The paid tier doesn't; enabling
+billing on the Google Cloud project is enough, no code change.
 
 ## Migrations
 
