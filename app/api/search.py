@@ -1,19 +1,20 @@
-import math
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from app.api.deps import CurrentUser, DbSession, EmbedderDep
+from app.api.errors import provider_error
 from app.schemas.search import SearchRequest, SearchResult
 from app.services import collections as collection_service
-from app.services import search as search_service
-from app.services.embeddings import EmbeddingBusyError, EmbeddingError
+from app.services import retrieval
+from app.services.embeddings import EmbeddingError
 
 router = APIRouter(tags=["search"])
 
 
-# TEMPORARY: lets you try vector search during Phase 4. Replaced by the real
-# retrieval service in Phase 6.
+# A debugging view: the chunks retrieval finds for a query, with their
+# distances, without generating an answer. POST /collections/{id}/ask uses the
+# same retrieval to answer questions.
 @router.post("/collections/{collection_id}/search", response_model=list[SearchResult])
 async def search_collection(
     collection_id: uuid.UUID,
@@ -26,16 +27,7 @@ async def search_collection(
     # embed a query for a collection the caller can't see.
     collection = await collection_service.get_owned_collection(db, collection_id, user.id)
     try:
-        return await search_service.search_collection(
-            db, embedder, collection, body.query, body.limit
-        )
-    except EmbeddingBusyError as exc:
-        # The shared embedding quota is used up for now. 503 rather than 429:
-        # this caller didn't send too much, the service as a whole is busy.
-        raise HTTPException(
-            status_code=503,
-            detail=str(exc),
-            headers={"Retry-After": str(max(1, math.ceil(exc.retry_after)))},
-        ) from exc
+        chunks = await retrieval.retrieve(db, embedder, collection, body.query, body.limit)
     except EmbeddingError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise provider_error(exc) from exc
+    return [SearchResult.model_validate(chunk, from_attributes=True) for chunk in chunks]

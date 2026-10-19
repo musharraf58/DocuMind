@@ -1,15 +1,30 @@
-"""TEMPORARY vector search, for trying out embeddings in Phase 4.
-To be replaced by the real retrieval service in Phase 6.
+"""Retrieval: find the chunks of one collection closest in meaning to a query.
+
+Used by POST /collections/{id}/ask (to answer questions) and by
+POST /collections/{id}/search (a debugging view of the same results).
 """
 
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
 
 from sqlalchemy import Select, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Chunk, Collection, Document
-from app.schemas.search import SearchResult
 from app.services.embeddings import EmbeddingProvider, Vector
+
+
+@dataclass(frozen=True)
+class RetrievedChunk:
+    chunk_id: uuid.UUID
+    document_id: uuid.UUID
+    document_name: str
+    content: str
+    page_number: int | None
+    section_title: str | None
+    distance: float  # cosine distance: 0 = same direction, larger = less similar
+
 
 # Run in the same transaction as each search. With filters, an HNSW index
 # scan normally looks at only ~40 nearest candidates (hnsw.ef_search) and
@@ -50,14 +65,15 @@ def build_search_query(
     )
 
 
-async def search_collection(
+async def retrieve(
     db: AsyncSession,
     embedder: EmbeddingProvider,
     collection: Collection,
     query: str,
     limit: int,
-) -> list[SearchResult]:
-    """Search a collection the caller has already proven they own."""
+) -> list[RetrievedChunk]:
+    """The `limit` chunks nearest to `query`, best first, from a collection the
+    caller has already proven they own."""
     # End the ownership check's read transaction so no database connection is
     # held while we wait on the embedding provider's network call.
     await db.commit()
@@ -68,6 +84,11 @@ async def search_collection(
     rows = await db.execute(
         build_search_query(collection.owner_id, collection.id, embedder.model, vector, limit)
     )
-    results = [SearchResult.model_validate(row, from_attributes=True) for row in rows]
+    results = [RetrievedChunk(**row._mapping) for row in rows]
     await db.commit()  # ends the transaction, and with it the SET LOCAL settings
     return results
+
+
+def filter_relevant(chunks: Sequence[RetrievedChunk], max_distance: float) -> list[RetrievedChunk]:
+    """Keep only chunks close enough to count as relevant (distance <= max)."""
+    return [chunk for chunk in chunks if chunk.distance <= max_distance]
