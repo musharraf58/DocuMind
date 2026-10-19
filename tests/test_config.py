@@ -41,6 +41,19 @@ def test_empty_min_retry_wait_in_env_file_means_computed(tmp_path):
     assert settings.embedding_min_retry_wait == 20
 
 
+def test_llm_and_rag_settings_defaults():
+    settings = make()
+    assert settings.LLM_PROVIDER == "gemini"  # real by default: fail loudly if unconfigured
+    assert settings.LLM_MODEL == "gemini-3.5-flash-lite"
+    assert (settings.LLM_MAX_OUTPUT_TOKENS, settings.LLM_TIMEOUT_SECONDS) == (600, 30)
+    assert settings.LLM_RPM_LIMIT == 10
+    assert settings.LLM_TEMPERATURE == 1.0
+    assert (settings.RAG_TOP_K, settings.RAG_MAX_DISTANCE) == (8, 0.72)
+    assert settings.RAG_CONTEXT_TOKEN_BUDGET == 3000
+    assert settings.ASK_MAX_QUESTION_CHARS == 1000
+    assert "SecretStr" in repr(settings.LLM_API_KEY) or "*" in str(settings.LLM_API_KEY)
+
+
 def test_job_settings_defaults():
     settings = make()
     assert settings.MAX_JOB_ATTEMPTS == 4

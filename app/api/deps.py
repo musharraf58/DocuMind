@@ -8,6 +8,7 @@ from app.core.database import get_db
 from app.core.security import decode_access_token
 from app.models import User
 from app.services.embeddings import EmbeddingError, EmbeddingProvider, get_embedding_provider
+from app.services.llm import LLMProvider, get_llm_provider
 from app.services.queue import JobQueue, get_queue
 from app.services.storage import StorageBackend, get_storage
 
@@ -31,6 +32,14 @@ def embedding_provider() -> EmbeddingProvider:
 
 
 EmbedderDep = Annotated[EmbeddingProvider, Depends(embedding_provider)]
+
+
+def llm_provider() -> LLMProvider:
+    """FastAPI dependency for the answer-generating LLM."""
+    return get_llm_provider()
+
+
+LLMDep = Annotated[LLMProvider, Depends(llm_provider)]
 
 
 async def get_current_user(

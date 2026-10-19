@@ -79,6 +79,32 @@ class Settings(BaseSettings):
     # rest stays free for interactive searches (0.67 of 3 = 2 requests).
     EMBEDDING_INGEST_RPM_SHARE: float = Field(default=0.67, gt=0, le=1)
 
+    # Answer generation (LLM). "fake" gives scripted answers with no network
+    # calls (local dev, tests). The default is the real provider so that a
+    # deployment that forgot this setting fails loudly instead of answering
+    # with canned text.
+    LLM_PROVIDER: Literal["gemini", "fake"] = "gemini"
+    LLM_MODEL: str = "gemini-3.5-flash-lite"
+    LLM_API_KEY: SecretStr = SecretStr("")
+    # Includes the model's "thinking" tokens, which count toward this limit.
+    LLM_MAX_OUTPUT_TOKENS: int = Field(default=600, ge=50)
+    LLM_TIMEOUT_SECONDS: float = Field(default=30, gt=0)
+    # Google publishes no free-tier figures any more (see AI Studio for your
+    # project); 15/minute was measured independently, so we stay below it.
+    LLM_RPM_LIMIT: int = Field(default=10, ge=1)
+    # Google strongly recommends the default 1.0 for Gemini 3 models: lower
+    # values "may lead to unexpected behavior, such as looping".
+    LLM_TEMPERATURE: float = Field(default=1.0, ge=0, le=2)
+
+    # Retrieval-augmented answers (POST /collections/{id}/ask).
+    RAG_TOP_K: int = Field(default=8, ge=1, le=50)
+    # Chunks farther than this (cosine distance) count as not relevant.
+    # Provisional: to be tuned against an evaluation set in Phase 8.
+    RAG_MAX_DISTANCE: float = Field(default=0.72, gt=0, le=2)
+    # How much source text (approximate tokens) goes into the prompt.
+    RAG_CONTEXT_TOKEN_BUDGET: int = Field(default=3000, ge=100)
+    ASK_MAX_QUESTION_CHARS: int = Field(default=1000, ge=1, le=10_000)
+
     # Background jobs (Celery worker).
     # Tries per document for transient failures (rate limits, timeouts, 5xx).
     MAX_JOB_ATTEMPTS: int = Field(default=4, ge=1)
