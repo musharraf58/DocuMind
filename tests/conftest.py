@@ -113,6 +113,7 @@ def storage_dir(tmp_path, monkeypatch) -> Path:
 def fake_embeddings(monkeypatch) -> None:
     """Every test embeds with the fake provider unless it builds its own."""
     monkeypatch.setattr(get_settings(), "EMBEDDING_PROVIDER", "fake")
+    monkeypatch.setattr(get_settings(), "LLM_PROVIDER", "fake")
 
 
 @pytest.fixture(autouse=True)
