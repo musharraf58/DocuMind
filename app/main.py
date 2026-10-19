@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import auth, collections, documents, health, search
+from app.api import ask, auth, collections, documents, health, search
 from app.core.database import SessionLocal
 from app.core.limits import MaxBodySizeMiddleware
 from app.core.logging import configure_logging
@@ -27,3 +27,4 @@ app.include_router(auth.router)
 app.include_router(collections.router)
 app.include_router(documents.router)
 app.include_router(search.router)
+app.include_router(ask.router)
