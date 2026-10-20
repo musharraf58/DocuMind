@@ -76,6 +76,10 @@ class GeminiLLMProvider(LLMProvider):
             self._raise_for_status(response)
         return self._parse(response)
 
+    async def _stream(self, system: str, user: str, max_tokens: int):
+        raise LLMError("Streaming is not available for this provider yet")
+        yield  # pragma: no cover (makes this an async generator)
+
     def _raise_for_status(self, response: httpx.Response) -> None:
         status = response.status_code
         error = _error_details(response)

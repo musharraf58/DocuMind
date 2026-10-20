@@ -3,7 +3,7 @@ from redis.asyncio import Redis
 from app.core.config import get_settings
 from app.core.redis import get_redis
 from app.services.embeddings.redis_rate_limit import RedisRateLimiter
-from app.services.llm.base import LLMProvider, LLMResult
+from app.services.llm.base import LLMProvider, LLMResult, LLMUsage
 from app.services.llm.errors import LLMBusyError, LLMError, LLMRefusalError, RetryableLLMError
 from app.services.llm.fake import FakeLLMProvider
 from app.services.llm.gemini import GeminiLLMProvider
@@ -16,6 +16,7 @@ __all__ = [
     "LLMProvider",
     "LLMRefusalError",
     "LLMResult",
+    "LLMUsage",
     "RetryableLLMError",
     "get_llm_provider",
 ]
