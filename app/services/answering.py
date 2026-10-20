@@ -176,11 +176,17 @@ async def finish(
             )
 
     task = asyncio.ensure_future(save())
-    try:
-        await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await task  # finish saving anyway, then let the cancellation through
-        raise
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Keep waiting: the save must finish. (Under anyio, which Starlette
+            # uses, cancellation is re-delivered at every await until we leave.)
+            cancelled = True
+    task.result()  # surface a failed save
+    if cancelled:
+        raise asyncio.CancelledError
     logger.info(
         "answer: conversation=%s message=%s status=%s grounded=%s citations=%d "
         "prompt_tokens=%d completion_tokens=%d",
@@ -192,3 +198,16 @@ async def finish(
         prompt_tokens,
         completion_tokens,
     )
+
+
+def done_payload(turn: Turn, answer: str, grounded: bool, citations: list[dict], usage) -> dict:
+    """The final event: exactly what is saved, so a client can replace the
+    streamed text with it."""
+    return {
+        "conversation_id": str(turn.conversation_id),
+        "message_id": str(turn.assistant_message_id),
+        "answer": answer,
+        "grounded": grounded,
+        "citations": citations,
+        "usage": {"prompt_tokens": usage[0], "completion_tokens": usage[1]},
+    }
