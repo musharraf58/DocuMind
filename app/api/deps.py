@@ -2,9 +2,9 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.database import get_db
+from app.core.database import SessionLocal, get_db
 from app.core.security import decode_access_token
 from app.models import User
 from app.services.embeddings import EmbeddingError, EmbeddingProvider, get_embedding_provider
@@ -18,6 +18,15 @@ from app.services.storage import StorageBackend, get_storage
 bearer_scheme = HTTPBearer(auto_error=False)
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
+
+
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    """For code that opens its own short sessions (the ask endpoints), instead
+    of holding one session for the whole request. Tests override this."""
+    return SessionLocal
+
+
+SessionFactory = Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factory)]
 StorageDep = Annotated[StorageBackend, Depends(get_storage)]
 QueueDep = Annotated[JobQueue, Depends(get_queue)]
 
@@ -60,6 +69,11 @@ async def get_current_user(
     user = await db.get(User, user_id)
     if user is None:
         raise unauthorized
+    # End the read transaction: it would otherwise keep a database connection
+    # checked out for the rest of the request, including a minutes-long
+    # streamed answer. (Sessions don't expire objects on commit, so `user`
+    # stays usable.)
+    await db.commit()
     return user
 
 

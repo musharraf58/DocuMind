@@ -10,6 +10,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.api.deps import get_session_factory
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.redis import get_redis
@@ -86,6 +87,8 @@ async def client(test_engine, job_queue) -> AsyncGenerator[AsyncClient]:
             yield session
 
     app.dependency_overrides[get_db] = override_get_db
+    # Code that opens its own short sessions must use the TEST database too.
+    app.dependency_overrides[get_session_factory] = lambda: session_factory
     app.dependency_overrides[get_queue] = lambda: job_queue  # never a real broker
     app.dependency_overrides[get_redis] = lambda: fake_redis  # never a real Redis
     transport = ASGITransport(app=app)

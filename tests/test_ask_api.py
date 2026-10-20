@@ -107,12 +107,14 @@ async def test_nothing_relevant_means_no_llm_call(client, embedder, llm):
     response = await ask(client, headers, collection_id, "Tell me about rockets")
 
     assert response.status_code == 200
-    assert response.json() == {
+    body = response.json()
+    assert {k: body[k] for k in ("answer", "grounded", "citations", "usage")} == {
         "answer": NOT_FOUND_ANSWER,
         "grounded": False,
         "citations": [],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0},
     }
+    assert body["conversation_id"] and body["message_id"]  # saved to history
     assert llm.calls == []  # the model was never asked
 
 

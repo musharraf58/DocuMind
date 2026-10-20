@@ -76,14 +76,25 @@ async def retrieve(
     caller has already proven they own."""
     # End the ownership check's read transaction so no database connection is
     # held while we wait on the embedding provider's network call.
+    owner_id, collection_id = collection.owner_id, collection.id
     await db.commit()
     vector = await embedder.embed_query(query)
+    return await search_by_vector(db, owner_id, collection_id, embedder.model, vector, limit)
 
+
+async def search_by_vector(
+    db: AsyncSession,
+    owner_id: uuid.UUID,
+    collection_id: uuid.UUID,
+    model: str,
+    vector: Vector,
+    limit: int,
+) -> list[RetrievedChunk]:
+    """The SQL half of retrieval, for callers that embedded the query themselves
+    (outside any session). One short transaction."""
     for setting in SEARCH_SETTINGS:
         await db.execute(text(setting))
-    rows = await db.execute(
-        build_search_query(collection.owner_id, collection.id, embedder.model, vector, limit)
-    )
+    rows = await db.execute(build_search_query(owner_id, collection_id, model, vector, limit))
     results = [RetrievedChunk(**row._mapping) for row in rows]
     await db.commit()  # ends the transaction, and with it the SET LOCAL settings
     return results
