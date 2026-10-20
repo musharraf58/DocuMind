@@ -54,6 +54,13 @@ def test_llm_and_rag_settings_defaults():
     assert "SecretStr" in repr(settings.LLM_API_KEY) or "*" in str(settings.LLM_API_KEY)
 
 
+def test_conversation_settings_defaults():
+    settings = make()
+    assert (settings.RAG_HISTORY_MAX_TURNS, settings.RAG_HISTORY_TOKEN_BUDGET) == (6, 1000)
+    assert settings.RAG_REWRITE_TIMEOUT_SECONDS == 10
+    assert settings.STREAM_HEARTBEAT_SECONDS == 15
+
+
 def test_job_settings_defaults():
     settings = make()
     assert settings.MAX_JOB_ATTEMPTS == 4
