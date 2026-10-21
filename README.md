@@ -2,9 +2,10 @@
 
 RAG knowledge base API. FastAPI (async), PostgreSQL + pgvector, SQLAlchemy 2.0 async, Redis.
 
-**Status:** Phase 7 (users, JWT auth, per-user collections, document upload and storage,
+**Status:** Phase 8 (users, JWT auth, per-user collections, document upload and storage,
 text extraction and chunking, embeddings and vector search, background processing,
-question answering with citations, streamed answers and conversations).
+question answering with citations, streamed answers and conversations, hybrid search and
+retrieval evaluation).
 
 ## Architecture
 
@@ -336,11 +337,44 @@ curl -X POST localhost:8000/collections/$COLLECTION_ID/search -H "Authorization:
   -H 'Content-Type: application/json' -d '{"query": "how do I run the tests?", "limit": 3}'
 ```
 
+Each result also has `vector_rank`, `keyword_rank` (its position in each list, `null` if
+not in it), `keyword_score`, `keyword_all_terms` and `rrf_score`, so you can see *why* it
+was found.
+
 It shows what retrieval finds for a query, with distances, without generating an answer:
 useful to see why a question was or wasn't answered. `/ask` (below) uses the same
 retrieval. Search only covers chunks embedded with the current `EMBEDDING_MODEL`. Documents
 processed before Phase 4 (no vectors yet), or with a different model, need to be processed
 again.
+
+### Hybrid search
+
+Embeddings capture meaning but blur rare exact terms: an error code like `ERR-4471` or a
+part number can sit far from the chunk that contains it. Keyword search is the opposite.
+With `RAG_SEARCH_MODE=hybrid` (the default) both run:
+
+- **vector**: the `HYBRID_CANDIDATES` chunks closest in meaning;
+- **keyword**: Postgres full-text search (`websearch_to_tsquery`, ranked by
+  `ts_rank_cd`) over a generated `tsvector` column with a GIN index (migration 0009),
+  so the column is recomputed by Postgres whenever a chunk is written and can't fall out of
+  sync on re-processing;
+- **Reciprocal Rank Fusion** merges the two lists: each chunk scores Σ 1 / (`RRF_K` +
+  rank) over the lists it appears in. Only ranks are used, never the raw scores, which
+  are on incomparable scales (a cosine distance and a `ts_rank_cd` value).
+
+Every candidate gets its vector distance, keyword-only hits included, because the
+relevance gate needs it.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `RAG_SEARCH_MODE` | `hybrid` | `hybrid` or `vector` |
+| `HYBRID_CANDIDATES` | 20 | Candidates from each list before fusion |
+| `RRF_K` | 60 | The RRF constant; larger flattens the difference between ranks |
+| `RAG_KEYWORD_MATCH` | `strict` | `strict`: a keyword hit needs every term; `loose`: any term |
+| `TEXT_SEARCH_CONFIG` | `english` | Stemming and stop words. The index uses `english`; other values work, unindexed |
+| `RAG_KEYWORD_GATE_SLACK` | 0.10 | Extra distance allowed for a strong keyword match (0 = off) |
+
+The defaults were chosen by measurement: see [Evaluation](#evaluation).
 
 ## Asking questions
 
@@ -482,8 +516,11 @@ question
   ▼
 retrieval (app/services/retrieval.py)
   │ 3. embed the question (Voyage, through the shared rate limiter)
-  │ 4. the RAG_TOP_K nearest chunks, owner + collection filters inside the SQL
-  │ 5. drop chunks farther than RAG_MAX_DISTANCE
+  │ 4. search (owner + collection filters inside the SQL). Hybrid (the default):
+  │      the HYBRID_CANDIDATES nearest chunks by meaning and the best keyword matches,
+  │      merged by Reciprocal Rank Fusion, top RAG_TOP_K. Vector: the RAG_TOP_K nearest.
+  │ 5. relevance gate (relevance.py): keep chunks within RAG_MAX_DISTANCE; in hybrid
+  │      mode, a strong keyword match within RAG_MAX_DISTANCE + RAG_KEYWORD_GATE_SLACK
   │      nothing left → "I could not find this in your documents", grounded=false,
   │                     and the LLM is NOT called
   ▼
@@ -550,6 +587,36 @@ model, so `LLM_RPM_LIMIT` defaults to 10. Daily quotas reset at midnight Pacific
 excerpts of your documents, to improve its products. The paid tier doesn't; enabling
 billing on the Google Cloud project is enough, no code change.
 
+## Evaluation
+
+`eval/` measures how well retrieval finds the right passage, without ever calling the LLM
+(free to run, repeatable, and it isolates the part that decides whether a good answer is
+possible). Details, and how to add documents and questions: [eval/README.md](eval/README.md).
+Results and the reasoning behind the defaults: [docs/EVALUATION.md](docs/EVALUATION.md).
+
+```bash
+uv run python -m eval.dataset      # check questions.yaml
+uv run python -m eval.run          # one evaluation with the current settings
+uv run python -m eval.run --mode vector --chunk-tokens 300 --max-distance 0.65
+uv run python -m eval.sweep        # rejection rates across RAG_MAX_DISTANCE values
+uv run python -m eval.experiments  # vector / keyword / hybrid, strict / loose, chunk sizes
+```
+
+Each run ingests `eval/corpus/` with the real pipeline into a collection owned by
+`eval@documind.local`, asks every question in `eval/questions.yaml` through the real
+search code, prints a table and saves a JSON report (with the full configuration) under
+`eval/reports/`. Embeddings are cached in Postgres by (model, input type, dimensions,
+SHA-256 of the text), so the first run on a fresh database makes a few Voyage requests
+and every later one makes none.
+
+Reading the table:
+
+- **hit@k**: share of answerable questions whose right chunk is in the top k.
+- **MRR**: average of 1 / rank of the right chunk; rewards rank 1 over rank 3.
+- **falseRej**: answerable questions the relevance gate turned away (lower is better).
+- **rejected**: unanswerable questions the gate turned away (higher is better).
+- **Failed questions**: each with the rank of its right chunk and its top results.
+
 ## Migrations
 
 ```bash
@@ -577,6 +644,9 @@ compose builds the Dockerfile's `dev` stage; a plain `docker build .` makes the 
 docker compose exec api pytest -q
 docker compose exec api ruff check .
 ```
+
+**Five tests fail on purpose**: `tests/test_eval_metrics.py` checks `mrr()` in
+`eval/metrics.py`, which is left as an exercise. They pass once it is implemented.
 
 If those commands report `executable file not found`, the container is running an older
 image: run `docker compose up -d --build` once to rebuild it.
