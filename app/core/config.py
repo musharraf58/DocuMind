@@ -105,6 +105,24 @@ class Settings(BaseSettings):
     RAG_CONTEXT_TOKEN_BUDGET: int = Field(default=3000, ge=100)
     ASK_MAX_QUESTION_CHARS: int = Field(default=1000, ge=1, le=10_000)
 
+    # Hybrid search. "vector": meaning only. "hybrid": meaning plus keywords
+    # (Postgres full-text search), merged by Reciprocal Rank Fusion. Chosen
+    # from evaluation results (docs/EVALUATION.md).
+    RAG_SEARCH_MODE: Literal["vector", "hybrid"] = "vector"
+    # How many candidates each list (vector, keyword) contributes to the fusion.
+    HYBRID_CANDIDATES: int = Field(default=20, ge=1, le=200)
+    # The k in RRF: score = sum of 1 / (k + rank). 60 is the usual choice.
+    RRF_K: int = Field(default=60, ge=1)
+    # "strict": a keyword match needs every term; "loose": any term.
+    RAG_KEYWORD_MATCH: Literal["strict", "loose"] = "strict"
+    # Postgres text search configuration ('english' stems words and drops
+    # stop words; 'simple' doesn't). The indexed column uses 'english' (see
+    # migration 0009); another value is computed on the fly, without an index.
+    TEXT_SEARCH_CONFIG: str = Field(default="english", pattern=r"^[a-z_]+$")
+    # Hybrid gate: a strong keyword match (all terms, keyword top 3) is kept
+    # up to RAG_MAX_DISTANCE + this. 0 disables that looser path.
+    RAG_KEYWORD_GATE_SLACK: float = Field(default=0.0, ge=0, le=1)
+
     # Conversations. How much earlier conversation goes into the prompt: at most
     # this many turns (question + answer), newest kept first, within the budget.
     RAG_HISTORY_MAX_TURNS: int = Field(default=6, ge=0, le=50)

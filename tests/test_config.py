@@ -61,6 +61,21 @@ def test_conversation_settings_defaults():
     assert settings.STREAM_HEARTBEAT_SECONDS == 15
 
 
+def test_search_settings_defaults():
+    settings = make()
+    assert (settings.RAG_SEARCH_MODE, settings.RAG_KEYWORD_MATCH) == ("vector", "strict")
+    assert (settings.HYBRID_CANDIDATES, settings.RRF_K) == (20, 60)
+    assert settings.TEXT_SEARCH_CONFIG == "english"
+
+
+def test_text_search_config_must_be_a_plain_name():
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        make(TEXT_SEARCH_CONFIG="english'); DROP TABLE chunks; --")
+
+
 def test_job_settings_defaults():
     settings = make()
     assert settings.MAX_JOB_ATTEMPTS == 4
