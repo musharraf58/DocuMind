@@ -51,6 +51,13 @@ questions:
       document: loyalty-programme.md
       must_contain: Points expire 24 months after they were earned
 
+  - id: goodwill-limit
+    type: answerable
+    question: How much goodwill refund can a support agent approve without a team lead?
+    expected:
+      document: support-handbook.txt
+      must_contain: goodwill refund of up to 75 euros without asking a team lead
+
   # --- keyword ---
   - id: err-4471
     type: keyword
@@ -102,6 +109,13 @@ questions:
       document: product-care.md
       must_contain: older dimmers cause most flicker complaints
 
+  - id: smoking-lamp
+    type: paraphrase
+    question: A customer says their lamp started smoking. What should support do?
+    expected:
+      document: support-handbook.txt
+      must_contain: escalated to the product safety team within one hour
+
   # --- short ---
   - id: short-exchanges
     type: short
@@ -116,6 +130,13 @@ questions:
     expected:
       document: shipping-and-delivery.md
       must_contain: no customs duties or import VAT
+
+  - id: short-chat-hours
+    type: short
+    question: chat opening hours
+    expected:
+      document: support-handbook.txt
+      must_contain: open from 08:00 to 20:00 on working days
 
   # --- unanswerable ---
   - id: no-parental-leave

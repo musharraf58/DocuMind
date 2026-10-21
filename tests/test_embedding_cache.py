@@ -35,7 +35,7 @@ async def test_second_run_makes_no_provider_calls(session_factory):
 
     assert sent(inner) == texts
     assert second == first == [as_stored(fake_vector(t, DIMENSIONS)) for t in texts]
-    assert (again.stats.hits, again.stats.misses) == (3, 0)
+    assert (again.stats.hits, again.stats.misses, again.stats.requests) == (3, 0, 0)
 
 
 async def test_only_new_texts_are_embedded_and_order_is_kept(session_factory):

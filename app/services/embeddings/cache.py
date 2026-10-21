@@ -38,6 +38,7 @@ def as_stored(vector: Vector) -> Vector:
 class CacheStats:
     hits: int = 0  # texts answered from the cache
     misses: int = 0  # distinct texts sent to the provider
+    requests: int = 0  # batches handed to the provider (retries not counted)
 
 
 class CachingEmbeddingProvider(EmbeddingProvider):
@@ -81,6 +82,7 @@ class CachingEmbeddingProvider(EmbeddingProvider):
             return vector
         vector = as_stored(await self.inner.embed_query(text))  # short wait: someone is waiting
         self.stats.misses += 1
+        self.stats.requests += 1
         await self._store("query", {text_key(text): vector})
         return vector
 
@@ -137,6 +139,7 @@ class CachingEmbeddingProvider(EmbeddingProvider):
             else:
                 batch_counts = [missing[key][1] for key in batch_keys] if known_counts else None
                 vectors = await self.inner.embed_documents(batch, batch_counts, heartbeat)
+            self.stats.requests += 1
             fresh = dict(zip(batch_keys, map(as_stored, vectors), strict=True))
             await self._store(input_type, fresh)
             new |= fresh
