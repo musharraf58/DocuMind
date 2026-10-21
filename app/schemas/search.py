@@ -17,7 +17,9 @@ class SearchRequest(BaseModel):
 
 
 class SearchResult(BaseModel):
-    """One matching chunk. Smaller distance = more similar (0 = same direction)."""
+    """One matching chunk, with what each search said about it (for
+    debugging retrieval). distance is the vector (cosine) distance: smaller
+    = more similar in meaning. Ranks are 1-based; null = not in that list."""
 
     chunk_id: uuid.UUID
     document_id: uuid.UUID
@@ -26,3 +28,8 @@ class SearchResult(BaseModel):
     page_number: int | None
     section_title: str | None
     distance: float
+    vector_rank: int | None = None
+    keyword_rank: int | None = None
+    keyword_score: float | None = None
+    keyword_all_terms: bool | None = None
+    rrf_score: float | None = None

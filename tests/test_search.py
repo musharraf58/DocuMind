@@ -67,6 +67,12 @@ async def test_results_are_ordered_by_meaning(client, keywords):
         "page_number",
         "section_title",
         "distance",
+        # retrieval debugging: what each search said about the chunk
+        "vector_rank",
+        "keyword_rank",
+        "keyword_score",
+        "keyword_all_terms",
+        "rrf_score",
     }
 
 

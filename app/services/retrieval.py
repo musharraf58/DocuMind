@@ -43,6 +43,9 @@ class RetrievedChunk:
     vector_rank: int | None = None
     keyword_rank: int | None = None
     keyword_score: float | None = None  # ts_rank_cd: higher = better keyword match
+    # True if the chunk contains ALL the query's terms (always so in strict
+    # mode). The relevance gate trusts only such matches.
+    keyword_all_terms: bool | None = None
     rrf_score: float | None = None
 
 
@@ -169,6 +172,7 @@ async def keyword_search(
         return []
     document_vector = _document_vector(config)
     score = func.ts_rank_cd(document_vector, tsquery)
+    all_terms = keyword_tsquery(query, config, "strict")
     rows = await db.execute(
         select(
             Chunk.id.label("chunk_id"),
@@ -179,6 +183,11 @@ async def keyword_search(
             Chunk.section_title,
             Chunk.embedding.cosine_distance(vector).label("distance"),
             score.label("keyword_score"),
+            (
+                document_vector.bool_op("@@")(all_terms)
+                if all_terms is not None
+                else literal(False)
+            ).label("keyword_all_terms"),
         )
         .join(Document, Document.id == Chunk.document_id)
         .where(
@@ -222,7 +231,10 @@ async def hybrid_search(
     for hit in by_keyword:
         if hit.chunk_id in merged:
             merged[hit.chunk_id] = replace(
-                merged[hit.chunk_id], keyword_rank=hit.keyword_rank, keyword_score=hit.keyword_score
+                merged[hit.chunk_id],
+                keyword_rank=hit.keyword_rank,
+                keyword_score=hit.keyword_score,
+                keyword_all_terms=hit.keyword_all_terms,
             )
         else:
             merged[hit.chunk_id] = hit  # keyword-only: its distance came with it
@@ -230,6 +242,73 @@ async def hybrid_search(
         [[c.chunk_id for c in by_vector], [c.chunk_id for c in by_keyword]], rrf_k
     )
     return [replace(merged[chunk_id], rrf_score=score) for chunk_id, score in fused[:top_k]]
+
+
+SearchMode = Literal["vector", "keyword", "hybrid"]
+
+
+@dataclass(frozen=True)
+class SearchOptions:
+    """How to search. From the settings for /search and /ask; varied by the
+    evaluation. "keyword" (keywords only) exists for evaluation."""
+
+    mode: SearchMode
+    top_k: int
+    candidates: int
+    rrf_k: int
+    text_search_config: str
+    keyword_match: KeywordMatch
+
+    @classmethod
+    def from_settings(cls, settings, top_k: int | None = None) -> "SearchOptions":
+        top_k = top_k or settings.RAG_TOP_K
+        return cls(
+            mode=settings.RAG_SEARCH_MODE,
+            top_k=top_k,
+            candidates=max(settings.HYBRID_CANDIDATES, top_k),
+            rrf_k=settings.RRF_K,
+            text_search_config=settings.TEXT_SEARCH_CONFIG,
+            keyword_match=settings.RAG_KEYWORD_MATCH,
+        )
+
+
+async def search_chunks(
+    db: AsyncSession,
+    owner_id: uuid.UUID,
+    collection_id: uuid.UUID,
+    model: str,
+    vector: Vector,
+    query: str,
+    options: SearchOptions,
+) -> list[RetrievedChunk]:
+    """Search one collection in the configured mode; best first, top_k results."""
+    if options.mode == "vector":
+        return await search_by_vector(db, owner_id, collection_id, model, vector, options.top_k)
+    if options.mode == "keyword":
+        return await keyword_search(
+            db,
+            owner_id,
+            collection_id,
+            model,
+            vector,
+            query,
+            options.top_k,
+            options.text_search_config,
+            options.keyword_match,
+        )
+    return await hybrid_search(
+        db,
+        owner_id,
+        collection_id,
+        model,
+        vector,
+        query,
+        options.candidates,
+        options.top_k,
+        options.rrf_k,
+        options.text_search_config,
+        options.keyword_match,
+    )
 
 
 def filter_relevant(chunks: Sequence[RetrievedChunk], max_distance: float) -> list[RetrievedChunk]:
