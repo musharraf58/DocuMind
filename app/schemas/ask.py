@@ -7,6 +7,8 @@ from app.core.config import get_settings
 
 class AskRequest(BaseModel):
     question: str
+    # Continue this conversation; without it a new conversation is started.
+    conversation_id: uuid.UUID | None = None
 
     @field_validator("question")
     @classmethod
@@ -38,6 +40,8 @@ class Usage(BaseModel):
 
 
 class AskResponse(BaseModel):
+    conversation_id: uuid.UUID
+    message_id: uuid.UUID  # the saved answer
     answer: str
     # True only if the answer cites at least one of the supplied sources.
     grounded: bool

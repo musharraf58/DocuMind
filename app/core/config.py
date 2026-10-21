@@ -105,6 +105,17 @@ class Settings(BaseSettings):
     RAG_CONTEXT_TOKEN_BUDGET: int = Field(default=3000, ge=100)
     ASK_MAX_QUESTION_CHARS: int = Field(default=1000, ge=1, le=10_000)
 
+    # Conversations. How much earlier conversation goes into the prompt: at most
+    # this many turns (question + answer), newest kept first, within the budget.
+    RAG_HISTORY_MAX_TURNS: int = Field(default=6, ge=0, le=50)
+    RAG_HISTORY_TOKEN_BUDGET: int = Field(default=1000, ge=0)
+    # A follow-up is first rewritten into a standalone question (one short LLM
+    # call); past this, the original question is used instead.
+    RAG_REWRITE_TIMEOUT_SECONDS: float = Field(default=10, gt=0)
+    # While a streamed answer is waiting, send an SSE comment this often so
+    # proxies and browsers don't close an idle-looking connection.
+    STREAM_HEARTBEAT_SECONDS: float = Field(default=15, gt=0)
+
     # Background jobs (Celery worker).
     # Tries per document for transient failures (rate limits, timeouts, 5xx).
     MAX_JOB_ATTEMPTS: int = Field(default=4, ge=1)

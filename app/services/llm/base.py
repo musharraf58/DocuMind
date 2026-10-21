@@ -2,19 +2,25 @@ import asyncio
 import logging
 import random
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
 from app.services.chunking import count_tokens
 from app.services.embeddings.errors import EmbeddingBusyError
 from app.services.embeddings.rate_limit import RateLimiter
-from app.services.llm.errors import LLMBusyError, RetryableLLMError
+from app.services.llm.errors import LLMBusyError, LLMError, RetryableLLMError
 
 logger = logging.getLogger(__name__)
 
 # Someone is waiting for the answer: never sit in rate-limit waits and retry
 # backoff for longer than this in total; answer "busy, retry in N s" instead.
 INTERACTIVE_MAX_WAIT_SECONDS = 20.0
+
+
+@dataclass(frozen=True)
+class LLMUsage:
+    prompt_tokens: int
+    completion_tokens: int
 
 
 @dataclass(frozen=True)
@@ -50,51 +56,113 @@ class LLMProvider(ABC):
 
     async def generate(self, system: str, user: str, max_tokens: int) -> LLMResult:
         """Generate a reply to `user` following the `system` instructions."""
-        estimated_tokens = count_tokens(system) + count_tokens(user) + max_tokens
-        waited = 0.0
-        attempt = 0
+        retry = _RetryState(self, count_tokens(system) + count_tokens(user) + max_tokens)
         while True:
-            if self.limiter is not None:
-                try:
-                    reservation = await self.limiter.acquire(
-                        estimated_tokens, "query", max_wait=max(0.0, self.max_wait - waited)
-                    )
-                except EmbeddingBusyError as exc:  # the limiter's "would wait too long"
-                    raise LLMBusyError(exc.retry_after) from exc
-                waited += reservation.waited
+            await retry.wait_for_capacity()
             try:
                 return await self._generate(system, user, max_tokens)
             except RetryableLLMError as exc:
-                if attempt >= self.max_retries:
-                    if exc.rate_limited:
-                        raise LLMBusyError(self._delay(attempt, exc.retry_after)) from exc
-                    raise
-                delay = self._delay(attempt, exc.retry_after)
-                if waited + delay > self.max_wait:
-                    if exc.rate_limited:
-                        raise LLMBusyError(delay) from exc
-                    raise
-                attempt += 1
-                logger.warning(
-                    "LLM request failed (%s); retry %d/%d in about %.0fs",
-                    exc,
-                    attempt,
-                    self.max_retries,
-                    delay,
-                )
-                if exc.rate_limited and self.limiter is not None:
-                    await self.limiter.penalize(delay)  # the next acquire() waits it out
-                else:
-                    await self._sleep(delay)
-                    waited += delay
+                await retry.before_retry(exc)
+
+    async def stream(
+        self, system: str, user: str, max_tokens: int
+    ) -> AsyncIterator[str | LLMUsage]:
+        """Like generate(), but yields the reply as it is produced: text pieces,
+        then one final LLMUsage.
+
+        Rate limiting, fail-fast and retries are the same as generate(), with
+        one difference: a request is retried only if it fails BEFORE its first
+        piece of text. Once text has been passed on, it can't be taken back, so
+        a later failure is final.
+
+        Stopping early (aclose(), or cancelling the task that iterates) closes
+        the provider request at once.
+        """
+        retry = _RetryState(self, count_tokens(system) + count_tokens(user) + max_tokens)
+        while True:
+            await retry.wait_for_capacity()
+            pieces = self._stream(system, user, max_tokens)
+            try:
+                first = await anext(pieces)
+            except StopAsyncIteration:
+                raise LLMError("The answer service returned an empty answer") from None
+            except RetryableLLMError as exc:
+                await pieces.aclose()
+                await retry.before_retry(exc)
+                continue
+            except BaseException:
+                await pieces.aclose()
+                raise
+            break
+        try:
+            yield first
+            async for piece in pieces:
+                yield piece
+        finally:
+            await pieces.aclose()  # stops the provider request if we stopped early
 
     @abstractmethod
     async def _generate(self, system: str, user: str, max_tokens: int) -> LLMResult:
         """Send ONE request. Raise RetryableLLMError for failures worth retrying,
         LLMRefusalError if the provider declines, LLMError for anything else."""
 
+    @abstractmethod
+    def _stream(self, system: str, user: str, max_tokens: int) -> AsyncIterator[str | LLMUsage]:
+        """Send ONE streaming request: yield text pieces, then one LLMUsage.
+        Same exceptions as _generate. Must stop the request when closed early."""
+
     def _delay(self, attempt: int, retry_after: float | None) -> float:
         """Exponential backoff with jitter; never sooner than the provider asked."""
         delay = min(self.retry_max_seconds, self.retry_base_seconds * 2**attempt)
         delay *= random.uniform(0.5, 1.0)
         return max(delay, retry_after or 0.0)
+
+
+class _RetryState:
+    """The waiting and retrying shared by generate() and stream(): wait for the
+    rate limiter, back off between attempts, and give up (busy) rather than
+    keep a waiting user hanging for more than max_wait in total."""
+
+    def __init__(self, provider: LLMProvider, estimated_tokens: int) -> None:
+        self.provider = provider
+        self.estimated_tokens = estimated_tokens
+        self.waited = 0.0
+        self.attempt = 0
+
+    async def wait_for_capacity(self) -> None:
+        provider = self.provider
+        if provider.limiter is None:
+            return
+        try:
+            reservation = await provider.limiter.acquire(
+                self.estimated_tokens, "query", max_wait=max(0.0, provider.max_wait - self.waited)
+            )
+        except EmbeddingBusyError as exc:  # the limiter's "would wait too long"
+            raise LLMBusyError(exc.retry_after) from exc
+        self.waited += reservation.waited
+
+    async def before_retry(self, exc: RetryableLLMError) -> None:
+        """Wait before the next attempt, or raise if we should give up."""
+        provider = self.provider
+        if self.attempt >= provider.max_retries:
+            if exc.rate_limited:
+                raise LLMBusyError(provider._delay(self.attempt, exc.retry_after)) from exc
+            raise exc
+        delay = provider._delay(self.attempt, exc.retry_after)
+        if self.waited + delay > provider.max_wait:
+            if exc.rate_limited:
+                raise LLMBusyError(delay) from exc
+            raise exc
+        self.attempt += 1
+        logger.warning(
+            "LLM request failed (%s); retry %d/%d in about %.0fs",
+            exc,
+            self.attempt,
+            provider.max_retries,
+            delay,
+        )
+        if exc.rate_limited and provider.limiter is not None:
+            await provider.limiter.penalize(delay)  # the next acquire() waits it out
+        else:
+            await provider._sleep(delay)
+            self.waited += delay

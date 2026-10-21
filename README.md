@@ -2,9 +2,9 @@
 
 RAG knowledge base API. FastAPI (async), PostgreSQL + pgvector, SQLAlchemy 2.0 async, Redis.
 
-**Status:** Phase 6 (users, JWT auth, per-user collections, document upload and storage,
+**Status:** Phase 7 (users, JWT auth, per-user collections, document upload and storage,
 text extraction and chunking, embeddings and vector search, background processing,
-question answering with citations).
+question answering with citations, streamed answers and conversations).
 
 ## Architecture
 
@@ -347,6 +347,11 @@ again.
 | Method | Path | What it does |
 |---|---|---|
 | POST | `/collections/{id}/ask` | Answer a question from your documents, with citations |
+| POST | `/collections/{id}/ask/stream` | The same, streamed as server-sent events (see below) |
+
+Both take `{"question": "...", "conversation_id": "..."}`. Without `conversation_id` a new
+conversation is started; with it, the question continues that conversation (which must
+belong to you and to this collection, otherwise `404`). Every question and answer is saved.
 
 ```bash
 curl -X POST localhost:8000/collections/$COLLECTION_ID/ask -H "Authorization: Bearer $TOKEN" \
@@ -355,6 +360,8 @@ curl -X POST localhost:8000/collections/$COLLECTION_ID/ask -H "Authorization: Be
 
 ```json
 {
+  "conversation_id": "...",
+  "message_id": "...",
   "answer": "Refunds are processed within 30 days [1].",
   "grounded": true,
   "citations": [
@@ -367,6 +374,104 @@ curl -X POST localhost:8000/collections/$COLLECTION_ID/ask -H "Authorization: Be
 
 `grounded` is `true` only when the answer cites at least one of the sources it was given.
 `citations` lists only those cited sources; `[n]` in the answer matches `number`.
+
+### Streaming answers
+
+`POST /collections/{id}/ask/stream` sends the answer as it is written, as
+[server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html)
+(`text/event-stream`). Use `curl -N` so curl prints events as they arrive:
+
+```bash
+curl -N -X POST localhost:8000/collections/$COLLECTION_ID/ask/stream \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"question": "How long do refunds take?"}'
+```
+
+```
+event: meta
+data: {"conversation_id":"...","message_id":"..."}
+
+event: token
+data: {"text":"Refunds are processed "}
+
+event: token
+data: {"text":"within 30 days [1]."}
+
+: heartbeat
+
+event: done
+data: {"conversation_id":"...","message_id":"...","answer":"Refunds are processed within 30 days [1].","grounded":true,"citations":[...],"usage":{"prompt_tokens":1834,"completion_tokens":41}}
+```
+
+Events, always in this order:
+
+| Event | When | Data |
+|---|---|---|
+| `meta` | first | `conversation_id`, `message_id` (the answer being written) |
+| `token` | while generating | `text`: the next piece of the answer |
+| `done` | at the end | the final `answer`, `grounded`, `citations`, `usage`: exactly what was saved |
+| `error` | instead of `done` | `message` (short, safe), `status` (429 or 503), `retry_after` (seconds or null) |
+
+Lines starting with `:` are comments: a heartbeat is sent every
+`STREAM_HEARTBEAT_SECONDS` while waiting, so proxies don't close an idle-looking connection.
+
+**Use `done`, not the tokens, as the answer.** Tokens are the model's raw output; only
+after the last one can the citations be checked. `done.answer` has invalid citation markers
+removed, and `done.citations` lists the verified sources. A client should show tokens as
+they arrive and then replace them with `done.answer`.
+
+If nothing in your documents is relevant, the stream is `meta`, one `token` with "I could
+not find this in your documents.", and `done` with `grounded: false`, without calling the
+model. Problems found before streaming starts are ordinary HTTP errors: `422` (invalid
+question), `404` (collection or conversation not yours), `409` (an answer is already being
+written in this conversation).
+
+If the client disconnects mid-answer, the request to Gemini is closed at once (it stops
+generating) and the answer is saved as `cancelled` with the text produced so far. If
+generation fails, it is saved as `failed` with the reason. The question is always saved
+first, so it is never lost.
+
+### Conversations
+
+```
+first question ──► new conversation (title = the question, ~60 chars; no LLM call)
+                   question saved, then answer saved (complete / failed / cancelled)
+follow-up      ──► 1. one short LLM call rewrites it into a standalone question, using the
+                      last few turns ("And for damaged items?" → "What is the refund policy
+                      for damaged items?"); on any failure the original question is used
+                   2. the REWRITTEN question is embedded and searched (one Voyage request)
+                   3. the answer prompt gets your own question, the last RAG_HISTORY_MAX_TURNS
+                      turns (within RAG_HISTORY_TOKEN_BUDGET, newest kept first) in their own
+                      <history> block, and this question's sources; old sources are never
+                      carried over
+```
+
+A follow-up therefore costs two Gemini requests (rewrite + answer); keep that in mind on
+the free tier. Only one answer can be written at a time per conversation; a second
+request gets `409`. (If a server dies mid-answer, the conversation frees itself after 5
+minutes.)
+
+Citations are saved as **snapshots** (document name, page, section, snippet, distance)
+rather than links to chunks: re-processing a document replaces its chunks, and old answers
+must still show what they cited.
+
+| Method | Path | What it does |
+|---|---|---|
+| GET | `/conversations` | Yours, most recently active first. `?collection_id=&limit=&offset=` |
+| GET | `/conversations/{id}` | One conversation with its messages, oldest first. `?limit=&offset=` |
+| PATCH | `/conversations/{id}` | Rename: `{"title": "..."}` (1-200 characters) |
+| DELETE | `/conversations/{id}` | Delete it and its messages |
+
+Other users' conversations return `404`. Deleting a collection deletes its conversations.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `RAG_HISTORY_MAX_TURNS` | 6 | Earlier turns included in the prompt |
+| `RAG_HISTORY_TOKEN_BUDGET` | 1000 | ...within this many tokens (newest kept first) |
+| `RAG_REWRITE_TIMEOUT_SECONDS` | 10 | After this, a follow-up is searched as asked |
+| `STREAM_HEARTBEAT_SECONDS` | 15 | Heartbeat interval while a stream is waiting |
+
+Logs contain ids, counts and token usage only, never question or answer text.
 
 ### How a question flows through the system
 

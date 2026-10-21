@@ -3,15 +3,17 @@
 https://ai.google.dev/api/generate-content
 """
 
+import json
 import logging
 import math
+from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import SecretStr
 
-from app.services.llm.base import LLMProvider, LLMResult
+from app.services.llm.base import LLMProvider, LLMResult, LLMUsage
 from app.services.llm.errors import LLMBusyError, LLMError, LLMRefusalError, RetryableLLMError
 
 logger = logging.getLogger(__name__)
@@ -46,17 +48,24 @@ class GeminiLLMProvider(LLMProvider):
         self._temperature = temperature
         self._transport = transport  # tests pass a MockTransport; None means the real network
 
-    async def _generate(self, system: str, user: str, max_tokens: int) -> LLMResult:
+    def _key(self) -> str:
         key = self._api_key.get_secret_value()
         if not key:
             raise LLMError("The answer service API key is not configured")
-        body = {
+        return key
+
+    def _body(self, system: str, user: str, max_tokens: int) -> dict:
+        return {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
             # No thinking setting: Flash-Lite's default is already "minimal".
             # Thinking tokens count toward maxOutputTokens.
             "generationConfig": {"maxOutputTokens": max_tokens, "temperature": self._temperature},
         }
+
+    async def _generate(self, system: str, user: str, max_tokens: int) -> LLMResult:
+        key = self._key()
+        body = self._body(system, user, max_tokens)
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout, transport=self._transport
@@ -75,6 +84,59 @@ class GeminiLLMProvider(LLMProvider):
         if response.status_code != 200:
             self._raise_for_status(response)
         return self._parse(response)
+
+    async def _stream(
+        self, system: str, user: str, max_tokens: int
+    ) -> AsyncIterator[str | LLMUsage]:
+        """streamGenerateContent with alt=sse: server-sent events, each "data:"
+        line one GenerateContentResponse. Text comes in the parts; usage may
+        come on every event or only the last, so the last one seen is kept.
+
+        Closing this generator early (the client went away) leaves the
+        `async with` blocks, which closes the HTTP connection: Google stops
+        generating."""
+        key = self._key()
+        body = self._body(system, user, max_tokens)
+        usage = LLMUsage(0, 0)
+        reason = None
+        any_text = False
+        try:
+            async with (
+                httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client,
+                client.stream(
+                    "POST",
+                    f"{API_BASE}/{self.model}:streamGenerateContent",
+                    params={"alt": "sse"},
+                    json=body,
+                    headers={"x-goog-api-key": key},  # never in the URL
+                ) as response,
+            ):
+                if response.status_code != 200:
+                    await response.aread()
+                    self._raise_for_status(response)
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue  # blank separators, comments
+                    data = _event_data(line)
+                    if (data.get("promptFeedback") or {}).get("blockReason"):
+                        raise LLMRefusalError("The answer service declined to answer this question")
+                    text, reason, event_usage = _read_chunk(data, reason)
+                    usage = event_usage or usage
+                    if text:
+                        any_text = True
+                        yield text
+        except httpx.TimeoutException as exc:
+            raise RetryableLLMError("The answer service timed out") from exc
+        except httpx.TransportError as exc:
+            raise RetryableLLMError("Could not reach the answer service") from exc
+
+        if not any_text:
+            if reason in REFUSAL_REASONS:
+                raise LLMRefusalError("The answer service declined to answer this question")
+            raise LLMError("The answer service returned an empty answer")
+        if reason == "MAX_TOKENS":
+            logger.warning("Gemini answer was cut off at LLM_MAX_OUTPUT_TOKENS")
+        yield usage
 
     def _raise_for_status(self, response: httpx.Response) -> None:
         status = response.status_code
@@ -130,6 +192,42 @@ class GeminiLLMProvider(LLMProvider):
         if reason == "MAX_TOKENS":
             logger.warning("Gemini answer was cut off at LLM_MAX_OUTPUT_TOKENS")
         return LLMResult(text, prompt_tokens, completion_tokens)
+
+
+def _event_data(line: str) -> dict:
+    try:
+        data = json.loads(line[len("data:") :].strip())
+    except ValueError as exc:
+        raise LLMError("The answer service returned an unexpected response") from exc
+    if not isinstance(data, dict):
+        raise LLMError("The answer service returned an unexpected response")
+    return data
+
+
+def _read_chunk(data: dict, reason: str | None) -> tuple[str, str | None, LLMUsage | None]:
+    """(text, finish reason so far, usage if this event carries it)."""
+    try:
+        text = ""
+        for candidate in data.get("candidates") or []:
+            parts = (candidate.get("content") or {}).get("parts") or []
+            # Thought summaries (if any) are not part of the answer.
+            text += "".join(p.get("text", "") for p in parts if not p.get("thought"))
+            reason = candidate.get("finishReason") or reason
+        usage = None
+        if data.get("usageMetadata"):
+            usage = _usage(data["usageMetadata"])
+    except (TypeError, AttributeError, ValueError) as exc:
+        raise LLMError("The answer service returned an unexpected response") from exc
+    return text, reason, usage
+
+
+def _usage(metadata: dict) -> LLMUsage:
+    # Thinking tokens are billed as output, so count them as completion.
+    return LLMUsage(
+        int(metadata.get("promptTokenCount") or 0),
+        int(metadata.get("candidatesTokenCount") or 0)
+        + int(metadata.get("thoughtsTokenCount") or 0),
+    )
 
 
 def _error_details(response: httpx.Response) -> dict:
