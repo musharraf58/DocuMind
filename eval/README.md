@@ -100,9 +100,9 @@ appear in the document's extracted text, a duplicate id, and so on.
 
 ## Running it
 
-Needs the database and Redis from `docker compose up -d db redis` (the
+Needs Postgres and Redis (`docker compose up -d postgres redis`). The
 Celery worker can keep running: the runner processes every document it
-creates immediately, so the worker never sees one pending). Run from the
+creates immediately, so the worker never sees one pending. Run from the
 project root:
 
 ```bash

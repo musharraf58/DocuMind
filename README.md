@@ -513,10 +513,11 @@ risk; it can't remove it, because the model still reads the text and may be pers
 Answers are therefore treated as untrusted output too: citations are validated, and
 nothing the model says is executed.
 
-**The relevance threshold is provisional.** `RAG_MAX_DISTANCE=0.72` is a starting guess.
-Distances depend on the embedding model and on your documents; Phase 8 tunes it against
-an evaluation set of questions with known answers. Use `/search` to see the distances
-your questions actually get.
+**The relevance threshold was measured, not guessed.** `RAG_MAX_DISTANCE=0.70` (with
+`RAG_KEYWORD_GATE_SLACK=0.10` in hybrid mode) comes from sweeping thresholds over the
+evaluation set ([docs/EVALUATION.md](docs/EVALUATION.md)). Distances depend on the
+embedding model and on your documents: after changing either, run `python -m eval.sweep`
+again. Use `/search` to see the distances your questions actually get.
 
 Errors: `422` invalid question; `404` not your collection; `429` (with `Retry-After`) when
 the embedding or answer quota is used up, including Gemini's daily limit (which resets at
@@ -537,7 +538,7 @@ Set `LLM_PROVIDER=gemini` and `LLM_API_KEY` (from Google AI Studio). Settings:
 | `LLM_RPM_LIMIT` | 10 | Requests per minute (shared through Redis) |
 | `LLM_TEMPERATURE` | 1.0 | Google recommends 1.0 for Gemini 3 models; lower can cause looping |
 | `RAG_TOP_K` | 8 | Chunks retrieved per question |
-| `RAG_MAX_DISTANCE` | 0.72 | Relevance cut-off (provisional) |
+| `RAG_MAX_DISTANCE` | 0.70 | Relevance cut-off, measured (see Evaluation) |
 | `RAG_CONTEXT_TOKEN_BUDGET` | 3000 | Source text per question (approximate tokens) |
 | `ASK_MAX_QUESTION_CHARS` | 1000 | Longest question accepted |
 

@@ -99,8 +99,9 @@ class Settings(BaseSettings):
     # Retrieval-augmented answers (POST /collections/{id}/ask).
     RAG_TOP_K: int = Field(default=8, ge=1, le=50)
     # Chunks farther than this (cosine distance) count as not relevant.
-    # Provisional: to be tuned against an evaluation set in Phase 8.
-    RAG_MAX_DISTANCE: float = Field(default=0.72, gt=0, le=2)
+    # Chosen with python -m eval.sweep for voyage-4-lite (docs/EVALUATION.md);
+    # re-measure after changing the embedding model.
+    RAG_MAX_DISTANCE: float = Field(default=0.70, gt=0, le=2)
     # How much source text (approximate tokens) goes into the prompt.
     RAG_CONTEXT_TOKEN_BUDGET: int = Field(default=3000, ge=100)
     ASK_MAX_QUESTION_CHARS: int = Field(default=1000, ge=1, le=10_000)
@@ -108,7 +109,7 @@ class Settings(BaseSettings):
     # Hybrid search. "vector": meaning only. "hybrid": meaning plus keywords
     # (Postgres full-text search), merged by Reciprocal Rank Fusion. Chosen
     # from evaluation results (docs/EVALUATION.md).
-    RAG_SEARCH_MODE: Literal["vector", "hybrid"] = "vector"
+    RAG_SEARCH_MODE: Literal["vector", "hybrid"] = "hybrid"
     # How many candidates each list (vector, keyword) contributes to the fusion.
     HYBRID_CANDIDATES: int = Field(default=20, ge=1, le=200)
     # The k in RRF: score = sum of 1 / (k + rank). 60 is the usual choice.
@@ -121,7 +122,7 @@ class Settings(BaseSettings):
     TEXT_SEARCH_CONFIG: str = Field(default="english", pattern=r"^[a-z_]+$")
     # Hybrid gate: a strong keyword match (all terms, keyword top 3) is kept
     # up to RAG_MAX_DISTANCE + this. 0 disables that looser path.
-    RAG_KEYWORD_GATE_SLACK: float = Field(default=0.0, ge=0, le=1)
+    RAG_KEYWORD_GATE_SLACK: float = Field(default=0.10, ge=0, le=1)
 
     # Conversations. How much earlier conversation goes into the prompt: at most
     # this many turns (question + answer), newest kept first, within the budget.

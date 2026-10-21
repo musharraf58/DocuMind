@@ -48,7 +48,7 @@ def test_llm_and_rag_settings_defaults():
     assert (settings.LLM_MAX_OUTPUT_TOKENS, settings.LLM_TIMEOUT_SECONDS) == (600, 30)
     assert settings.LLM_RPM_LIMIT == 10
     assert settings.LLM_TEMPERATURE == 1.0
-    assert (settings.RAG_TOP_K, settings.RAG_MAX_DISTANCE) == (8, 0.72)
+    assert (settings.RAG_TOP_K, settings.RAG_MAX_DISTANCE) == (8, 0.70)
     assert settings.RAG_CONTEXT_TOKEN_BUDGET == 3000
     assert settings.ASK_MAX_QUESTION_CHARS == 1000
     assert "SecretStr" in repr(settings.LLM_API_KEY) or "*" in str(settings.LLM_API_KEY)
@@ -63,7 +63,8 @@ def test_conversation_settings_defaults():
 
 def test_search_settings_defaults():
     settings = make()
-    assert (settings.RAG_SEARCH_MODE, settings.RAG_KEYWORD_MATCH) == ("vector", "strict")
+    assert (settings.RAG_SEARCH_MODE, settings.RAG_KEYWORD_MATCH) == ("hybrid", "strict")
+    assert settings.RAG_KEYWORD_GATE_SLACK == 0.10
     assert (settings.HYBRID_CANDIDATES, settings.RRF_K) == (20, 60)
     assert settings.TEXT_SEARCH_CONFIG == "english"
 
