@@ -1,0 +1,135 @@
+# The DocuMind retrieval evaluation set. How to add questions and documents:
+# eval/README.md.
+#
+# Every question except "unanswerable" ones names where its answer lives:
+# the document (file name in eval/corpus/) and a short passage the right chunk
+# must contain (compared ignoring case and line breaks). Optionally a page,
+# for PDFs. Never a chunk id: chunks are rebuilt, with new ids, every time a
+# document is processed or the chunk size changes.
+#
+# Types:
+#   answerable    a plain question, worded much like the document
+#   keyword       hinges on a rare exact term (an error code, a part number)
+#   paraphrase    asks for the answer in different words than the document
+#   short         two or three words, as people type into a search box
+#   unanswerable  the corpus doesn't answer it; retrieval should find nothing
+
+questions:
+  # --- answerable ---
+  - id: refund-timing
+    type: answerable
+    question: How long does it take to get my money back after a return?
+    expected:
+      document: returns-and-refunds.md
+      must_contain: the refund is paid within 14 days
+
+  - id: battery-warranty
+    type: answerable
+    question: How long is the warranty on rechargeable batteries?
+    expected:
+      document: warranty-and-repairs.md
+      must_contain: Rechargeable batteries are covered for one year
+
+  - id: free-shipping-threshold
+    type: answerable
+    question: From what order amount is shipping free?
+    expected:
+      document: shipping-and-delivery.md
+      must_contain: Shipping is free on orders of 50 euros or more
+
+  - id: points-per-euro
+    type: answerable
+    question: How many loyalty points do I earn per euro spent?
+    expected:
+      document: loyalty-programme.md
+      must_contain: one point for every euro spent
+
+  - id: points-expiry
+    type: answerable
+    question: When do Lantern points expire?
+    expected:
+      document: loyalty-programme.md
+      must_contain: Points expire 24 months after they were earned
+
+  # --- keyword ---
+  - id: err-4471
+    type: keyword
+    question: ERR-4471
+    expected:
+      document: ops-runbook.md
+      must_contain: ERR-4471 means the scanner lost its connection
+
+  - id: part-zx9
+    type: keyword
+    question: What is part ZX-9?
+    expected:
+      document: warranty-and-repairs.md
+      must_contain: part ZX-9, the battery clip
+
+  - id: sl-77
+    type: keyword
+    question: The main panel shows SL-77, what now?
+    expected:
+      document: ops-runbook.md
+      must_contain: the weight scale at the induction point has drifted
+
+  # --- paraphrase ---
+  - id: change-of-mind
+    type: paraphrase
+    question: Can I send something back if I just don't like it anymore?
+    expected:
+      document: returns-and-refunds.md
+      must_contain: including simply changing your mind
+
+  - id: not-home
+    type: paraphrase
+    question: What happens if I'm out when the delivery driver comes?
+    expected:
+      document: shipping-and-delivery.md
+      must_contain: the courier tries once more the next working day
+
+  - id: old-lamp-broken
+    type: paraphrase
+    question: My lamp broke three years after I bought it. Will you still fix it?
+    expected:
+      document: warranty-and-repairs.md
+      must_contain: After the warranty ends we still repair products
+
+  - id: blinking-lamp
+    type: paraphrase
+    question: Why does my lamp keep blinking when I turn it down?
+    expected:
+      document: product-care.md
+      must_contain: older dimmers cause most flicker complaints
+
+  # --- short ---
+  - id: short-exchanges
+    type: short
+    question: exchanges
+    expected:
+      document: returns-and-refunds.md
+      must_contain: We do not do direct exchanges
+
+  - id: short-customs
+    type: short
+    question: customs fees
+    expected:
+      document: shipping-and-delivery.md
+      must_contain: no customs duties or import VAT
+
+  # --- unanswerable ---
+  - id: no-parental-leave
+    type: unanswerable
+    question: How many weeks of parental leave do employees get?
+
+  - id: no-sourdough
+    type: unanswerable
+    question: How do I bake sourdough bread at home?
+
+  - id: no-phone-number
+    type: unanswerable
+    question: What is the customer service phone number?
+
+  - id: no-revenue
+    type: unanswerable
+    question: What was Larkspur's revenue last year?

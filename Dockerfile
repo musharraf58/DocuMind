@@ -33,9 +33,11 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 
 FROM base AS dev
-# The dev dependency group (pytest, ruff, ...), then the tests themselves.
+# The dev dependency group (pytest, ruff, ...), then the tests and the
+# retrieval evaluation (its tests import it).
 RUN uv sync --frozen --no-install-project
 COPY tests ./tests
+COPY eval ./eval
 
 
 # Last stage = the default target, so a plain `docker build .` makes the slim image.
