@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Chunk, Collection, Document
 from app.models.chunk import INDEXED_TEXT_SEARCH_CONFIG
 from app.services.embeddings import EmbeddingProvider, Vector
+from app.services.fusion import reciprocal_rank_fusion
 
 KeywordMatch = Literal["strict", "loose"]
 _WORDS = re.compile(r"\w+")
@@ -194,6 +195,41 @@ async def keyword_search(
     results = [RetrievedChunk(**row._mapping) for row in rows]
     await db.commit()
     return [replace(c, keyword_rank=rank) for rank, c in enumerate(results, start=1)]
+
+
+async def hybrid_search(
+    db: AsyncSession,
+    owner_id: uuid.UUID,
+    collection_id: uuid.UUID,
+    model: str,
+    vector: Vector,
+    query: str,
+    candidates: int,
+    top_k: int,
+    rrf_k: int,
+    config: str,
+    match: KeywordMatch,
+) -> list[RetrievedChunk]:
+    """The top `candidates` of vector search and of keyword search, fused with
+    Reciprocal Rank Fusion; the best `top_k`, each chunk once. Every result
+    carries its vector distance (keyword-only hits included), vector rank,
+    keyword rank and fused score."""
+    by_vector = await search_by_vector(db, owner_id, collection_id, model, vector, candidates)
+    by_keyword = await keyword_search(
+        db, owner_id, collection_id, model, vector, query, candidates, config, match
+    )
+    merged = {chunk.chunk_id: chunk for chunk in by_vector}
+    for hit in by_keyword:
+        if hit.chunk_id in merged:
+            merged[hit.chunk_id] = replace(
+                merged[hit.chunk_id], keyword_rank=hit.keyword_rank, keyword_score=hit.keyword_score
+            )
+        else:
+            merged[hit.chunk_id] = hit  # keyword-only: its distance came with it
+    fused = reciprocal_rank_fusion(
+        [[c.chunk_id for c in by_vector], [c.chunk_id for c in by_keyword]], rrf_k
+    )
+    return [replace(merged[chunk_id], rrf_score=score) for chunk_id, score in fused[:top_k]]
 
 
 def filter_relevant(chunks: Sequence[RetrievedChunk], max_distance: float) -> list[RetrievedChunk]:
