@@ -12,6 +12,7 @@ from app.models import User
 from app.services.embeddings import EmbeddingError, EmbeddingProvider, get_embedding_provider
 from app.services.llm import LLMProvider, get_llm_provider
 from app.services.queue import JobQueue, get_queue
+from app.services.quotas import Quotas
 from app.services.storage import StorageBackend, get_storage
 from app.services.usage import UsageRecorder
 
@@ -42,6 +43,13 @@ def get_usage_recorder(sessions: SessionFactory, redis: RedisDep) -> UsageRecord
 
 
 RecorderDep = Annotated[UsageRecorder, Depends(get_usage_recorder)]
+
+
+def get_quotas(redis: RedisDep) -> Quotas:
+    return Quotas(redis)
+
+
+QuotasDep = Annotated[Quotas, Depends(get_quotas)]
 
 
 def embedding_provider() -> EmbeddingProvider:

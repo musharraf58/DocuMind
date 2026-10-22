@@ -2,7 +2,7 @@ import uuid
 
 from fastapi import APIRouter
 
-from app.api.deps import CurrentUser, DbSession, EmbedderDep, RecorderDep
+from app.api.deps import CurrentUser, DbSession, EmbedderDep, QuotasDep, RecorderDep
 from app.api.errors import provider_error
 from app.api.limits import limit_default
 from app.core.config import get_settings
@@ -25,12 +25,15 @@ async def search_collection(
     user: CurrentUser,
     embedder: EmbedderDep,
     recorder: RecorderDep,
+    quotas: QuotasDep,
 ):
     # Ownership first: 404 for other users' collections, and we never pay to
     # embed a query for a collection the caller can't see.
     collection = await collection_service.get_owned_collection(db, collection_id, user.id)
     owner_id, collection_id = collection.owner_id, collection.id
     await db.commit()  # no transaction held during the embedding call
+    # Search keeps working when the LLM budget is gone; only embedding counts.
+    await quotas.check_embed_tokens(owner_id)
     try:
         with recorder.scope(owner_id):
             vector = await embedder.embed_query(body.query)

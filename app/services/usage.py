@@ -28,8 +28,11 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import UsageEvent, UsageKind
+from app.services.quotas import EMBED_TOKENS, Quotas
 
 logger = logging.getLogger(__name__)
+
+EMBED_KINDS = {UsageKind.embed_document, UsageKind.embed_query}
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,14 @@ def current_user_id() -> uuid.UUID | None:
     return scope.user_id if scope else None
 
 
+def current_quotas() -> tuple[uuid.UUID, Quotas] | None:
+    """The scope's user and their quotas, if a scope with Redis is open."""
+    scope = _current.get()
+    if scope is None or scope.recorder.redis is None:
+        return None
+    return scope.user_id, Quotas(scope.recorder.redis)
+
+
 async def record(kind: UsageKind, model: str, tokens_in: int, tokens_out: int = 0) -> None:
     """Called by the providers after each successful request."""
     scope = _current.get()
@@ -102,6 +113,9 @@ async def record(kind: UsageKind, model: str, tokens_in: int, tokens_out: int = 
         document_id=scope.document_id,
         conversation_id=scope.conversation_id,
     )
+    if kind in EMBED_KINDS and scope.recorder.redis is not None:
+        # The daily quota counts what the provider actually reported.
+        await Quotas(scope.recorder.redis).add(scope.user_id, EMBED_TOKENS, event.tokens_in)
     try:
         await scope.recorder.save(scope, event)
     except Exception:

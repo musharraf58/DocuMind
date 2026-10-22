@@ -149,3 +149,16 @@ def no_network(monkeypatch) -> None:
         raise RuntimeError(f"Tests must not make network calls (tried {request.url.host})")
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", refuse)
+
+
+@pytest.fixture(autouse=True)
+def generous_quotas(monkeypatch) -> None:
+    """Daily quotas high enough never to get in the way; their tests lower them."""
+    settings = get_settings()
+    for name in [
+        "DAILY_QUESTIONS_PER_USER",
+        "DAILY_EMBED_TOKENS_PER_USER",
+        "DAILY_UPLOADS_PER_USER",
+        "GLOBAL_DAILY_LLM_BUDGET",
+    ]:
+        monkeypatch.setattr(settings, name, 10**9)

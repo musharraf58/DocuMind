@@ -35,3 +35,9 @@ class EmbeddingBusyError(EmbeddingError):
 class RequestTooLargeError(EmbeddingError):
     """One request is bigger than the per-minute allowance, so no amount of
     waiting or retrying could ever get it through."""
+
+
+class DailyEmbeddingQuotaError(EmbeddingError):
+    """The document's owner has used up today's embedding tokens
+    (DAILY_EMBED_TOKENS_PER_USER). Permanent for this attempt: the user can
+    reprocess the document after the daily reset."""

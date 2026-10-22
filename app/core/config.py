@@ -186,6 +186,15 @@ class Settings(BaseSettings):
     REGISTRATION_MODE: Literal["open", "invite", "closed"] = "invite"
     # Never logged or printed (SecretStr). Share it only with people you invite.
     INVITE_CODE: SecretStr = SecretStr("")
+    # Daily quotas, per user (Redis counters; the day starts at QUOTA_RESET_HOUR_UTC).
+    DAILY_QUESTIONS_PER_USER: int = Field(default=50, ge=0)
+    # About a 300-page book; queries count too (a few tokens each).
+    DAILY_EMBED_TOKENS_PER_USER: int = Field(default=200_000, ge=0)
+    DAILY_UPLOADS_PER_USER: int = Field(default=20, ge=0)
+    # LLM requests per day for ALL users together (answers, rewrites, retries).
+    # Gemini's free tier allowed about 500 a day when measured; this leaves room.
+    GLOBAL_DAILY_LLM_BUDGET: int = Field(default=350, ge=0)
+    QUOTA_RESET_HOUR_UTC: int = Field(default=0, ge=0, le=23)
     # Interactive API docs (/docs, /redoc, /openapi.json).
     DOCS_ENABLED: bool = True
     # In production, docs stay refused unless this explicit opt-in is set too.

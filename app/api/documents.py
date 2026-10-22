@@ -5,13 +5,14 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import CurrentUser, DbSession, QueueDep, StorageDep
+from app.api.deps import CurrentUser, DbSession, QueueDep, QuotasDep, StorageDep
 from app.api.limits import limit_default, limit_upload
 from app.models import DocumentStatus
 from app.schemas.chunk import ChunkRead
 from app.schemas.document import DocumentRead
 from app.services import collections as collection_service
 from app.services import documents as document_service
+from app.services.quotas import UPLOADS
 
 router = APIRouter(tags=["documents"])
 
@@ -29,13 +30,22 @@ async def upload_document(
     user: CurrentUser,
     storage: StorageDep,
     queue: QueueDep,
+    quotas: QuotasDep,
 ):
     """Store the file and queue it for processing. 202: accepted, processing
     happens in the background; poll GET /documents/{id} for its status."""
     collection = await collection_service.get_owned_collection(db, collection_id, user.id)
-    # upload_document has COMMITTED the "pending" document when it returns, so
-    # a worker that picks the job up immediately is sure to find it.
-    document = await document_service.upload_document(db, storage, collection, file)
+    # A document that can't be embedded today isn't worth storing now.
+    await quotas.check_embed_tokens(user.id)
+    await quotas.take_upload(user.id)
+    try:
+        # upload_document has COMMITTED the "pending" document when it
+        # returns, so a worker that picks the job up at once is sure to find it.
+        document = await document_service.upload_document(db, storage, collection, file)
+    except HTTPException:
+        # Refused (type, size, duplicate...): it doesn't count as an upload.
+        await quotas.give_back(user.id, UPLOADS)
+        raise
     await queue.enqueue(document.id)  # if this fails, the sweeper enqueues it later
     return document
 
