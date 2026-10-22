@@ -174,6 +174,13 @@ class Settings(BaseSettings):
     RATE_LIMIT_UPLOAD: str = "10/hour"
     # Every other authenticated endpoint.
     RATE_LIMIT_DEFAULT: str = "120/minute"
+    # Progressive delay after failed logins (per account + IP): this many are
+    # free, then each failure blocks the next try for BASE, 2xBASE, 4xBASE ...
+    # seconds, up to MAX. Forgotten after WINDOW minutes without a failure.
+    LOGIN_FREE_ATTEMPTS: int = Field(default=3, ge=0)
+    LOGIN_DELAY_BASE_SECONDS: float = Field(default=2, gt=0)
+    LOGIN_DELAY_MAX_SECONDS: float = Field(default=900, gt=0)
+    LOGIN_FAILURE_WINDOW_MINUTES: float = Field(default=15, gt=0)
     # Who may create an account. "open": anyone; "invite": anyone with
     # INVITE_CODE (an empty code means nobody); "closed": nobody.
     REGISTRATION_MODE: Literal["open", "invite", "closed"] = "invite"
