@@ -158,6 +158,10 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = ""
     # Largest request body for everything except uploads (JSON bodies are tiny).
     MAX_REQUEST_BODY_KB: int = Field(default=64, ge=1)
+    # How many reverse proxies WE run in front of the API. 0: use the connection
+    # address and ignore X-Forwarded-For (which any client can forge). N: the
+    # client is the Nth address from the right in X-Forwarded-For.
+    TRUSTED_PROXY_COUNT: int = Field(default=0, ge=0, le=10)
     # Interactive API docs (/docs, /redoc, /openapi.json).
     DOCS_ENABLED: bool = True
     # In production, docs stay refused unless this explicit opt-in is set too.
