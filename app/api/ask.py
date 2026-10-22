@@ -3,7 +3,13 @@ import uuid
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import CurrentUser, EmbedderDep, LLMDep, SessionFactory
+from app.api.deps import (
+    CurrentUser,
+    EmbedderDep,
+    LLMDep,
+    RecorderDep,
+    SessionFactory,
+)
 from app.api.errors import provider_error
 from app.api.limits import limit_ask
 from app.core.config import get_settings
@@ -31,6 +37,7 @@ async def ask(
     sessions: SessionFactory,
     embedder: EmbedderDep,
     llm: LLMDep,
+    recorder: RecorderDep,
 ):
     """Answer a question from the documents in one of your collections, citing
     the sources it used, and save both to a conversation (a new one unless
@@ -38,7 +45,14 @@ async def ask(
     the answer (including "I could not find this in your documents")."""
     try:
         answer = await ask_service.answer_question(
-            sessions, embedder, llm, user.id, collection_id, body.question, body.conversation_id
+            sessions,
+            embedder,
+            llm,
+            user.id,
+            collection_id,
+            body.question,
+            body.conversation_id,
+            recorder,
         )
     except ConversationBusyError as exc:
         raise HTTPException(status_code=409, detail=BUSY) from exc
@@ -73,6 +87,7 @@ async def ask_stream(
     sessions: SessionFactory,
     embedder: EmbedderDep,
     llm: LLMDep,
+    recorder: RecorderDep,
 ):
     """Like /ask, but streams the answer as server-sent events: meta, then
     token events as text is generated, then done (the final answer, with
@@ -87,7 +102,7 @@ async def ask_stream(
         )
     except ConversationBusyError as exc:
         raise HTTPException(status_code=409, detail=BUSY) from exc
-    events = stream_answer(sessions, embedder, llm, turn, body.question)
+    events = stream_answer(sessions, embedder, llm, turn, body.question, recorder)
     return StreamingResponse(
         with_heartbeats(events, get_settings().STREAM_HEARTBEAT_SECONDS),
         media_type="text/event-stream",

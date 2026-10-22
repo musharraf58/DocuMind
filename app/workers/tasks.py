@@ -19,6 +19,7 @@ from app.services import jobs, sweeper
 from app.services.embeddings import EmbeddingError, get_embedding_provider
 from app.services.queue import CeleryJobQueue
 from app.services.storage import get_storage
+from app.services.usage import UsageRecorder
 from app.workers.celery_app import PROCESS_DOCUMENT, SWEEP, celery_app
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,8 @@ async def process(document_id: uuid.UUID) -> jobs.JobResult:
             except EmbeddingError as exc:
                 # Misconfiguration (e.g. dimensions not matching the database).
                 return await jobs.fail_without_processing(db, document_id, str(exc))
-            result = await jobs.run_job(db, document_id, get_storage(), embedder)
+            recorder = UsageRecorder(async_sessionmaker(engine, expire_on_commit=False), redis)
+            result = await jobs.run_job(db, document_id, get_storage(), embedder, recorder=recorder)
         if result.outcome == jobs.Outcome.retry:
             # The document is already back to "pending"; if this enqueue
             # fails, the sweeper picks it up.

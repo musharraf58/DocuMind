@@ -132,3 +132,20 @@ def test_fake_provider_is_used_in_tests():
     # Guard: the worker tests above must not be talking to Voyage.
     assert isinstance(tasks.get_embedding_provider(None), FakeEmbeddingProvider)
     assert DIMENSIONS == 1024
+
+
+async def test_worker_records_embedding_usage_for_the_owner(client, db, job_queue, sent):
+    from sqlalchemy import select
+
+    from app.models import UsageEvent, UsageKind
+
+    doc_id = await pending_document(client, job_queue)
+    document = await db.get(Document, doc_id)
+    assert (await tasks.process(doc_id)).outcome == Outcome.ready
+
+    events = (await db.scalars(select(UsageEvent))).all()
+    assert len(events) >= 1
+    assert {e.kind for e in events} == {UsageKind.embed_document}
+    assert {e.user_id for e in events} == {document.owner_id}
+    assert {e.document_id for e in events} == {doc_id}
+    assert all(e.tokens_in > 0 and e.tokens_out == 0 for e in events)

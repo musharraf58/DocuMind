@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
+from app.models import UsageKind
+from app.services import usage
 from app.services.chunking import count_tokens
 from app.services.embeddings.errors import EmbeddingBusyError
 from app.services.embeddings.rate_limit import RateLimiter
@@ -54,15 +56,27 @@ class LLMProvider(ABC):
         self.retry_max_seconds = retry_max_seconds
         self._sleep = sleep
 
-    async def generate(self, system: str, user: str, max_tokens: int) -> LLMResult:
-        """Generate a reply to `user` following the `system` instructions."""
+    async def generate(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        usage_kind: UsageKind = UsageKind.llm_answer,
+    ) -> LLMResult:
+        """Generate a reply to `user` following the `system` instructions.
+        usage_kind: what the request is recorded as (an answer or a rewrite)."""
         retry = _RetryState(self, count_tokens(system) + count_tokens(user) + max_tokens)
         while True:
             await retry.wait_for_capacity()
             try:
-                return await self._generate(system, user, max_tokens)
+                result = await self._generate(system, user, max_tokens)
             except RetryableLLMError as exc:
                 await retry.before_retry(exc)
+                continue
+            await usage.record(
+                usage_kind, self.model, result.prompt_tokens, result.completion_tokens
+            )
+            return result
 
     async def stream(
         self, system: str, user: str, max_tokens: int
@@ -95,9 +109,22 @@ class LLMProvider(ABC):
                 raise
             break
         try:
-            yield first
-            async for piece in pieces:
+            piece = first
+            while True:
+                if isinstance(piece, LLMUsage):
+                    # The final piece: the request is complete, record it.
+                    # (A stream stopped early has no usage to record.)
+                    await usage.record(
+                        UsageKind.llm_answer,
+                        self.model,
+                        piece.prompt_tokens,
+                        piece.completion_tokens,
+                    )
                 yield piece
+                try:
+                    piece = await anext(pieces)
+                except StopAsyncIteration:
+                    break
         finally:
             await pieces.aclose()  # stops the provider request if we stopped early
 

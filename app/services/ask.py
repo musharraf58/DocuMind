@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 from app.core.config import get_settings
 from app.models import MessageStatus
-from app.services import answering
+from app.services import answering, usage
 from app.services.answering import (  # noqa: F401 (re-exported for callers)
     DECLINED_ANSWER,
     NOT_FOUND_ANSWER,
@@ -20,6 +20,7 @@ from app.services.context import Source
 from app.services.conversations import Turn
 from app.services.embeddings import EmbeddingError, EmbeddingProvider
 from app.services.llm import LLMError, LLMProvider, LLMRefusalError
+from app.services.usage import UsageRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -43,12 +44,25 @@ async def answer_question(
     collection_id: uuid.UUID,
     question: str,
     conversation_id: uuid.UUID | None = None,
+    recorder: UsageRecorder | None = None,
 ) -> Answer:
     """Raises 404 / ConversationBusyError before anything is saved, and
     EmbeddingError / LLMError (after saving the answer as failed)."""
-    settings = get_settings()
     started = time.monotonic()
     turn = await answering.begin(sessions, owner_id, collection_id, question, conversation_id)
+    with usage.scoped(recorder, owner_id, conversation_id=turn.conversation_id):
+        return await _answer(sessions, embedder, llm, turn, question, started)
+
+
+async def _answer(
+    sessions: Sessions,
+    embedder: EmbeddingProvider,
+    llm: LLMProvider,
+    turn: Turn,
+    question: str,
+    started: float,
+) -> Answer:
+    settings = get_settings()
     try:
         found = await answering.find_sources(sessions, embedder, llm, turn, question)
         if not found.sources:

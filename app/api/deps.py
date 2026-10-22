@@ -2,15 +2,18 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.database import SessionLocal, get_db
+from app.core.redis import get_redis
 from app.core.security import decode_access_token
 from app.models import User
 from app.services.embeddings import EmbeddingError, EmbeddingProvider, get_embedding_provider
 from app.services.llm import LLMProvider, get_llm_provider
 from app.services.queue import JobQueue, get_queue
 from app.services.storage import StorageBackend, get_storage
+from app.services.usage import UsageRecorder
 
 # HTTPBearer makes Swagger's "Authorize" dialog a single "Value" box for a token.
 # auto_error=False so a missing/malformed header reaches our code and we return
@@ -29,6 +32,16 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 SessionFactory = Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factory)]
 StorageDep = Annotated[StorageBackend, Depends(get_storage)]
 QueueDep = Annotated[JobQueue, Depends(get_queue)]
+RedisDep = Annotated[Redis, Depends(get_redis)]
+
+
+def get_usage_recorder(sessions: SessionFactory, redis: RedisDep) -> UsageRecorder:
+    """Where usage events and daily counters go (the test database and fake
+    Redis in tests, through the overrides of the two dependencies)."""
+    return UsageRecorder(sessions, redis)
+
+
+RecorderDep = Annotated[UsageRecorder, Depends(get_usage_recorder)]
 
 
 def embedding_provider() -> EmbeddingProvider:
