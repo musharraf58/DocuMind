@@ -135,6 +135,12 @@ def generous_limits(monkeypatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def open_registration(monkeypatch) -> None:
+    """Most tests just need accounts; tests of the modes set their own."""
+    monkeypatch.setattr(get_settings(), "REGISTRATION_MODE", "open")
+
+
+@pytest.fixture(autouse=True)
 def no_network(monkeypatch) -> None:
     """Fail loudly if anything tries a real HTTP request. (The test client
     talks to the app in-process via ASGITransport, which is unaffected.)"""

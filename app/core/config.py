@@ -174,6 +174,11 @@ class Settings(BaseSettings):
     RATE_LIMIT_UPLOAD: str = "10/hour"
     # Every other authenticated endpoint.
     RATE_LIMIT_DEFAULT: str = "120/minute"
+    # Who may create an account. "open": anyone; "invite": anyone with
+    # INVITE_CODE (an empty code means nobody); "closed": nobody.
+    REGISTRATION_MODE: Literal["open", "invite", "closed"] = "invite"
+    # Never logged or printed (SecretStr). Share it only with people you invite.
+    INVITE_CODE: SecretStr = SecretStr("")
     # Interactive API docs (/docs, /redoc, /openapi.json).
     DOCS_ENABLED: bool = True
     # In production, docs stay refused unless this explicit opt-in is set too.

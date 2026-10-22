@@ -20,6 +20,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
     dependencies=[limit_register],
 )
 async def register(payload: UserCreate, db: DbSession):
+    user_service.check_registration_allowed(payload.invite_code)
     return await user_service.register_user(db, payload.email, payload.password)
 
 
