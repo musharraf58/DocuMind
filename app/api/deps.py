@@ -62,12 +62,13 @@ async def get_current_user(
     )
     if credentials is None:
         raise unauthorized
-    user_id = decode_access_token(credentials.credentials)
-    if user_id is None:
+    claims = decode_access_token(credentials.credentials)
+    if claims is None:
         raise unauthorized
     # Look the user up on every request: a deleted user's old token stops working.
-    user = await db.get(User, user_id)
-    if user is None:
+    user = await db.get(User, claims.user_id)
+    # A token from before the last password change carries an older version.
+    if user is None or user.token_version != claims.token_version:
         raise unauthorized
     # End the read transaction: it would otherwise keep a database connection
     # checked out for the rest of the request, including a minutes-long

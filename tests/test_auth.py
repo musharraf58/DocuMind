@@ -76,7 +76,7 @@ async def test_expired_token_is_401(client: AsyncClient) -> None:
     me = (await client.get("/auth/me", headers=headers)).json()
     settings = get_settings()
     expired = jwt.encode(
-        {"sub": me["id"], "exp": int(time.time()) - 60},
+        {"sub": me["id"], "ver": 0, "exp": int(time.time()) - 60},
         settings.SECRET_KEY,
         algorithm=settings.JWT_ALGORITHM,
     )
@@ -88,7 +88,7 @@ async def test_expired_token_is_401(client: AsyncClient) -> None:
 
 async def test_token_signed_with_wrong_key_is_401(client: AsyncClient) -> None:
     forged = jwt.encode(
-        {"sub": str(uuid.uuid4()), "exp": int(time.time()) + 600},
+        {"sub": str(uuid.uuid4()), "ver": 0, "exp": int(time.time()) + 600},
         "a-completely-different-secret-key-0123456789",
         algorithm="HS256",
     )
@@ -101,7 +101,7 @@ async def test_token_signed_with_wrong_key_is_401(client: AsyncClient) -> None:
 async def test_valid_token_for_nonexistent_user_is_401(client: AsyncClient) -> None:
     settings = get_settings()
     token = jwt.encode(
-        {"sub": str(uuid.uuid4()), "exp": int(time.time()) + 600},
+        {"sub": str(uuid.uuid4()), "ver": 0, "exp": int(time.time()) + 600},
         settings.SECRET_KEY,
         algorithm=settings.JWT_ALGORITHM,
     )

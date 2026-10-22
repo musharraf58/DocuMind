@@ -41,6 +41,10 @@ class ChangePassword(BaseModel):
     new_password: str = Field(max_length=MAX_LENGTH)
 
 
+class DeleteAccount(BaseModel):
+    password: str = Field(max_length=MAX_LENGTH)
+
+
 class UserRead(BaseModel):
     """Output. There is deliberately no password field of any kind here."""
 
