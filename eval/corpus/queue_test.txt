@@ -1,0 +1,9 @@
+Queue test document created on Sun Oct 18 06:24:01 PM +06 2026.
+
+The warehouse opens at six in the morning and closes at ten at night. Deliveries
+are accepted only before noon, and every delivery must include a signed packing
+slip. Late deliveries are stored overnight and counted the next working day.
+
+Returns are inspected within two working days. Items that arrive in their
+original packaging are refunded in full, while opened items are refunded
+minus a handling fee.
