@@ -34,17 +34,20 @@ async def upload_document(
 ):
     """Store the file and queue it for processing. 202: accepted, processing
     happens in the background; poll GET /documents/{id} for its status."""
-    collection = await collection_service.get_owned_collection(db, collection_id, user.id)
+    # Read once: a failed upload rolls the session back, which expires `user`
+    # (reading user.id after that would try to reload it from the database).
+    user_id = user.id
+    collection = await collection_service.get_owned_collection(db, collection_id, user_id)
     # A document that can't be embedded today isn't worth storing now.
-    await quotas.check_embed_tokens(user.id)
-    await quotas.take_upload(user.id)
+    await quotas.check_embed_tokens(user_id)
+    await quotas.take_upload(user_id)
     try:
         # upload_document has COMMITTED the "pending" document when it
         # returns, so a worker that picks the job up at once is sure to find it.
         document = await document_service.upload_document(db, storage, collection, file)
     except HTTPException:
         # Refused (type, size, duplicate...): it doesn't count as an upload.
-        await quotas.give_back(user.id, UPLOADS)
+        await quotas.give_back(user_id, UPLOADS)
         raise
     await queue.enqueue(document.id)  # if this fails, the sweeper enqueues it later
     return document
