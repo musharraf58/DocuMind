@@ -8,14 +8,18 @@ import math
 from fastapi import HTTPException
 
 from app.services.embeddings import EmbeddingBusyError, EmbeddingError, RetryableEmbeddingError
-from app.services.llm import LLMBusyError, LLMError, RetryableLLMError
+from app.services.llm import LLMBudgetExhausted, LLMBusyError, LLMError, RetryableLLMError
+from app.services.quotas import capacity_reached
 
 DEFAULT_RETRY_AFTER_SECONDS = 30
 
 
 def provider_error(exc: EmbeddingError | LLMError) -> HTTPException:
     """429 when it's a rate limit (with Retry-After), 503 for everything else:
-    provider down, timed out, or misconfigured."""
+    provider down, timed out, or misconfigured; and 503 "daily capacity
+    reached" when our own global LLM budget is used up."""
+    if isinstance(exc, LLMBudgetExhausted):
+        return capacity_reached(max(1, math.ceil(exc.retry_after)))
     if isinstance(exc, EmbeddingBusyError | LLMBusyError):
         return _too_many_requests(str(exc), exc.retry_after)
     if isinstance(exc, RetryableEmbeddingError | RetryableLLMError) and exc.rate_limited:

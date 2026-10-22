@@ -1,0 +1,125 @@
+# Hardening: database review and dependency audit
+
+Measured 2026-10-22 for Phase 9. The limits, quotas and HTTP hardening are
+described in the README ("Security and Limits"); this file records the
+database review and the dependency audit.
+
+## 1. Indexes behind the hot queries
+
+### How it was measured
+
+`EXPLAIN (ANALYZE, BUFFERS)` on a **scratch database** (`documind_explain`,
+never the dev database), built with `alembic upgrade head` and seeded with
+synthetic data. Measuring on an empty database proves nothing: with a few
+rows the planner scans whole tables because that is cheapest.
+
+| Table | Rows | Shape |
+| --- | ---: | --- |
+| users | 1,000 | |
+| collections | 5,000 | 5 per user |
+| documents | 50,000 | 10 per collection; 1% pending, 1% processing, 3% failed |
+| chunks | 60,000 | 1 per document, plus one "heavy" collection with 10,010 chunks (1024-dim vectors) |
+| conversations | 20,000 | 20 per user |
+| messages | 400,000 | 20 per conversation |
+| usage_events | 300,000 | 300 per user over 60 days |
+
+Each query below is the SQL the app sends (same filters, order and limit),
+for a typical user, and for the heavy collection where it matters.
+
+### Results
+
+| # | Query (endpoint) | Plan | Time |
+| --- | --- | --- | ---: |
+| 1 | Documents of a collection, newest first (`GET /collections/{id}/documents`) | BitmapAnd of `uq_documents_collection_hash` (collection_id first) and `ix_documents_owner_id`, then sort 10 rows | 0.36 ms |
+| 2 | Same with `?status=failed` | Same, status as a filter | 0.13 ms |
+| 3 | Collections of a user (`GET /collections`) | `ix_collections_owner_id`, sort 5 rows | 0.08 ms |
+| 4 | Conversations, latest first (`GET /conversations`) | `ix_conversations_owner_updated`, sort 20 rows | 0.36 ms |
+| 5 | Messages of a conversation (`GET /conversations/{id}`) | `ix_messages_conversation_created` (+ owner index), sort 20 rows | 0.59 ms |
+| 6 | Recent history for a follow-up (newest 16) | Index Scan **Backward** on `ix_messages_conversation_created`: no sort at all | 0.07 ms |
+| 7 | Vector search, heavy collection (10,010 chunks) | Exact: the user's documents, their chunks via `uq_chunks_document_index`, distance for every chunk, top-20 heap sort | 90–100 ms warm (200 ms cold) |
+| 8 | Vector search, typical collection | Bitmap on `ix_chunks_collection_id` + `ix_chunks_owner_id`, 10 distances | 1.1 ms |
+| 9 | Keyword search, heavy collection | Same document loop, `@@` as a filter | 50 ms (see note) |
+| 10 | Usage totals since a time (`GET /usage`) | `ix_usage_events_user_id_created_at` (new in 0012), both columns in the index condition | 0.66 ms |
+| 11 | Upload caps: count, bytes, in progress | `ix_documents_owner_id`, aggregate 50 rows | 0.25 ms |
+| 12 | Sweeper: pending documents queued long ago | `ix_documents_status` | 1.0 ms |
+
+### Findings
+
+- **No missing index.** Every per-user list (1–6, 10, 11) is under 1 ms and
+  uses an index. The sorts left are over 5–20 rows, which costs microseconds.
+  An index such as `(collection_id, created_at DESC)` would remove the sort in
+  query 1, but there is nothing measurable to gain, and every extra index
+  slows every write. **No migration was added.**
+- **The upload caps bound these queries.** A user can have at most 50 documents
+  (`MAX_DOCUMENTS_PER_USER`), so "this user's documents" can never become a big
+  scan. Raising the caps a lot is the point at which to measure again.
+- **Vector search is the slowest query and the one to watch.** For the heavy
+  collection the planner skips the HNSW index and computes the exact distance
+  to all 10,010 chunks (about 0.1 s warm). This is a sound choice:
+  - recall is 100%;
+  - forcing the HNSW index (with `hnsw.iterative_scan`, which the app already
+    sets) returned the same top 20 in 100–150 ms, no faster.
+
+  The data is synthetic (random vectors reused from a pool), and real
+  embeddings cluster, which helps HNSW. So re-measure with real documents
+  before changing anything. Cost grows linearly with collection size; at
+  `MAX_STORAGE_MB_PER_USER=100` a collection stays in the tens of thousands of
+  chunks, so a fraction of a second, below the embedding call that comes
+  before it.
+- **Keyword search (9)** looks slow only because every synthetic chunk in the
+  heavy collection contains both search words, so there is nothing for the
+  GIN index to narrow down. Real queries match a few chunks.
+- **Migrations 0011 and 0012** were checked on the scratch database: upgrade,
+  downgrade to 0010, upgrade again, all clean.
+
+Reproduce: create the scratch database, `DATABASE_URL=... alembic upgrade
+head`, seed with `generate_series` inserts like the table above, then run the
+queries with `EXPLAIN (ANALYZE, BUFFERS)`. Drop the scratch database afterwards.
+
+## 2. Connection pool and statement timeout
+
+`app/core/database.py`, settings in `.env.example`:
+
+| Setting | Default | Why |
+| --- | ---: | --- |
+| `DB_POOL_SIZE` | 5 | Connections the API keeps open |
+| `DB_MAX_OVERFLOW` | 10 | Extra connections opened under load, closed afterwards |
+| `DB_POOL_TIMEOUT_SECONDS` | 10 | How long a request waits for a free connection before failing with an error, instead of piling up |
+| `DB_STATEMENT_TIMEOUT_MS` | 15,000 | Postgres cancels any single API statement running longer. The slowest measured query takes ~0.1 s, so 15 s only ever stops a runaway query |
+| `DB_WORKER_STATEMENT_TIMEOUT_MS` | 300,000 | The worker stores a large document's chunks and vectors in one write |
+
+Connections are also recycled after 30 minutes (`pool_recycle`), before a
+proxy or firewall drops them silently, and checked before use
+(`pool_pre_ping`).
+
+**Budget:** (pool_size + max_overflow) × API processes + worker must stay below
+Postgres's `max_connections` (100 by default). One API process and the worker
+use at most 15 + 1 connections. Managed free tiers often allow fewer, so
+check the host's limit in Phase 10.
+
+The app never holds a transaction while waiting on the network (embedding,
+LLM, streaming), so a pool of 5 serves far more concurrent requests than 5.
+The exception is an upload: it holds a lock on the user's row until it
+commits (the upload caps), which only blocks that user's other uploads.
+
+## 3. Dependency audit
+
+`pip-audit` 2.10.1, run once on the locked dependencies (200 packages,
+including dev tools):
+
+```bash
+uv export --format requirements-txt --no-hashes --no-emit-project --all-groups > /tmp/req.txt
+uvx pip-audit -r /tmp/req.txt --disable-pip --no-deps
+```
+
+| Package | Was | Advisory | Affects DocuMind? | Action |
+| --- | --- | --- | --- | --- |
+| certifi | 2026.7.22 | PYSEC-2026-4320 / GHSA-6q48-6c7w-9gw2: trusted a root CA whose intermediates' keys were compromised | **Yes**: certifi supplies the trusted CAs for our HTTPS calls to Voyage and Gemini, so an on-path attacker with a compromised key could read the API keys in transit | Upgraded to 2026.10.19 |
+| pypdf | 6.20.1 | CVE-2026-113786 / GHSA-5hx5-vpf9-5wcv: a crafted PDF can make pypdf call arbitrary image parsers (`/DCTDecode`) | Not today: it needs Pillow, which isn't installed. But we parse PDFs from strangers, and Pillow could arrive as a dependency later | Upgraded to 6.21.2; minimum raised to `pypdf>=6.21.1` |
+
+After the upgrades: **no known vulnerabilities found.** Rebuild the Docker
+image (`docker compose build`) to pick up the new versions.
+
+pip-audit sends package names and versions (nothing else) to the PyPI
+advisory database. Run it again before each deploy; a CI job could do it
+automatically.

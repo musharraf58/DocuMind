@@ -6,6 +6,8 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from app.models import UsageKind
+from app.services import usage
 from app.services.chunking import count_tokens
 from app.services.embeddings.errors import (
     EmbeddingBusyError,
@@ -19,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 Vector = list[float]
 InputType = Literal["document", "query"]
+USAGE_KINDS: dict[str, UsageKind] = {
+    "document": UsageKind.embed_document,
+    "query": UsageKind.embed_query,
+}
 # Called before every attempt to send: "I'm still alive", for callers that need
 # to prove a long run hasn't been abandoned.
 Heartbeat = Callable[[], Awaitable[None]]
@@ -301,6 +307,8 @@ class EmbeddingProvider(ABC):
         if reservation is not None:
             await reservation.correct(result.total_tokens)
         self._check_vectors(result.vectors, len(texts))
+        # The provider's own token count, for the user's history and daily quota.
+        await usage.record(USAGE_KINDS[input_type], self.model, result.total_tokens)
         return result, waited
 
     def _retry_delay(

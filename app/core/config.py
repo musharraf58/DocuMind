@@ -2,12 +2,35 @@ import math
 from functools import lru_cache
 from typing import Literal, Self
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Share of the token budget held back from document embedding so that search
 # queries can still get through while a long document is being embedded.
 QUERY_RESERVE_FRACTION = 0.05
+
+# SECRET_KEY signs every login token: whoever knows it can sign a token for
+# any user. These are values from examples and tutorials that people forget
+# to change (compared case-insensitively).
+KNOWN_WEAK_SECRETS = {
+    "change-me",
+    "changeme",
+    "change_me",
+    "please-change-me",
+    "secret",
+    "secret-key",
+    "secret_key",
+    "your-secret-key",
+    "your_secret_key",
+    "supersecret",
+    "dev",
+    "development",
+    "test",
+    "password",
+    "documind",
+}
+MIN_SECRET_LENGTH = 32
+MIN_INVITE_CODE_LENGTH = 12
 
 
 class Settings(BaseSettings):
@@ -15,7 +38,11 @@ class Settings(BaseSettings):
 
     # env_ignore_empty: "NAME=" with nothing after it means "use the default",
     # rather than an empty string that may not even parse (e.g. as a number).
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_ignore_empty=True)
+    # hide_input_in_errors: a validation error would otherwise print every input
+    # value, API keys and SECRET_KEY included, into the startup log.
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", env_ignore_empty=True, hide_input_in_errors=True
+    )
 
     DATABASE_URL: str
     REDIS_URL: str
@@ -148,6 +175,73 @@ class Settings(BaseSettings):
     # ...and treat "processing" documents with no heartbeat for this long as stuck.
     STALE_PROCESSING_MINUTES: float = Field(default=10, gt=0)
 
+    # Database connections (API process). See app/core/database.py.
+    DB_POOL_SIZE: int = Field(default=5, ge=1)
+    DB_MAX_OVERFLOW: int = Field(default=10, ge=0)
+    DB_POOL_TIMEOUT_SECONDS: float = Field(default=10, gt=0)
+    # Postgres cancels any single statement running longer than this. The
+    # slowest measured API query (vector search, 10,000 chunks) takes ~0.1 s.
+    DB_STATEMENT_TIMEOUT_MS: int = Field(default=15_000, ge=100)
+    # The worker writes a whole document's chunks and vectors in one go.
+    DB_WORKER_STATEMENT_TIMEOUT_MS: int = Field(default=300_000, ge=100)
+
+    # Logging. "json": one JSON object per line, for log collectors.
+    LOG_FORMAT: Literal["text", "json"] = "text"
+
+    # "production" turns on strict startup checks (see check_production) and HSTS.
+    APP_ENV: Literal["development", "production"] = "development"
+    # Browser origins allowed to call the API, comma-separated, e.g.
+    # "https://app.example.com". Empty: no cross-origin browser access. "*" is refused.
+    CORS_ORIGINS: str = ""
+    # Largest request body for everything except uploads (JSON bodies are tiny).
+    MAX_REQUEST_BODY_KB: int = Field(default=64, ge=1)
+    # How many reverse proxies WE run in front of the API. 0: use the connection
+    # address and ignore X-Forwarded-For (which any client can forge). N: the
+    # client is the Nth address from the right in X-Forwarded-For.
+    TRUSTED_PROXY_COUNT: int = Field(default=0, ge=0, le=10)
+    # Inbound rate limits ("N/second|minute|hour|day"), per endpoint class. See
+    # the README's "Security and Limits" for why each is what it is.
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_LOGIN_PER_IP: str = "10/minute"
+    RATE_LIMIT_LOGIN_PER_EMAIL: str = "5/minute"
+    RATE_LIMIT_REGISTER_PER_IP: str = "5/hour"
+    # Changing the password, deleting the account (per user).
+    RATE_LIMIT_ACCOUNT: str = "5/minute"
+    RATE_LIMIT_ASK: str = "10/minute"
+    RATE_LIMIT_UPLOAD: str = "10/hour"
+    # Every other authenticated endpoint.
+    RATE_LIMIT_DEFAULT: str = "120/minute"
+    # Progressive delay after failed logins (per account + IP): this many are
+    # free, then each failure blocks the next try for BASE, 2xBASE, 4xBASE ...
+    # seconds, up to MAX. Forgotten after WINDOW minutes without a failure.
+    LOGIN_FREE_ATTEMPTS: int = Field(default=3, ge=0)
+    LOGIN_DELAY_BASE_SECONDS: float = Field(default=2, gt=0)
+    LOGIN_DELAY_MAX_SECONDS: float = Field(default=900, gt=0)
+    LOGIN_FAILURE_WINDOW_MINUTES: float = Field(default=15, gt=0)
+    # Who may create an account. "open": anyone; "invite": anyone with
+    # INVITE_CODE (an empty code means nobody); "closed": nobody.
+    REGISTRATION_MODE: Literal["open", "invite", "closed"] = "invite"
+    # Never logged or printed (SecretStr). Share it only with people you invite.
+    INVITE_CODE: SecretStr = SecretStr("")
+    # Upload caps per user: total stored, number of documents, and documents
+    # waiting or being processed at once.
+    MAX_STORAGE_MB_PER_USER: int = Field(default=100, ge=1)
+    MAX_DOCUMENTS_PER_USER: int = Field(default=50, ge=1)
+    MAX_PENDING_DOCUMENTS_PER_USER: int = Field(default=5, ge=1)
+    # Daily quotas, per user (Redis counters; the day starts at QUOTA_RESET_HOUR_UTC).
+    DAILY_QUESTIONS_PER_USER: int = Field(default=50, ge=0)
+    # About a 300-page book; queries count too (a few tokens each).
+    DAILY_EMBED_TOKENS_PER_USER: int = Field(default=200_000, ge=0)
+    DAILY_UPLOADS_PER_USER: int = Field(default=20, ge=0)
+    # LLM requests per day for ALL users together (answers, rewrites, retries).
+    # Gemini's free tier allowed about 500 a day when measured; this leaves room.
+    GLOBAL_DAILY_LLM_BUDGET: int = Field(default=350, ge=0)
+    QUOTA_RESET_HOUR_UTC: int = Field(default=0, ge=0, le=23)
+    # Interactive API docs (/docs, /redoc, /openapi.json).
+    DOCS_ENABLED: bool = True
+    # In production, docs stay refused unless this explicit opt-in is set too.
+    ALLOW_DOCS_IN_PRODUCTION: bool = False
+
     @property
     def embedding_token_budget(self) -> int:
         """Tokens we allow ourselves per 60 seconds."""
@@ -185,6 +279,72 @@ class Settings(BaseSettings):
     def embedding_document_token_budget(self) -> int:
         """Largest batch of document text: the budget minus the queries' share."""
         return self.embedding_token_budget - self.embedding_query_reserve_tokens
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
+    @field_validator(
+        "RATE_LIMIT_LOGIN_PER_IP",
+        "RATE_LIMIT_LOGIN_PER_EMAIL",
+        "RATE_LIMIT_REGISTER_PER_IP",
+        "RATE_LIMIT_ACCOUNT",
+        "RATE_LIMIT_ASK",
+        "RATE_LIMIT_UPLOAD",
+        "RATE_LIMIT_DEFAULT",
+    )
+    @classmethod
+    def check_rate(cls, value: str) -> str:
+        from app.core.rate_limit import Rate
+
+        Rate.parse(value)  # a typo fails at startup, not on the first request
+        return value
+
+    @model_validator(mode="after")
+    def check_cors(self) -> Self:
+        # "*" lets any website call the API from its visitors' browsers. Never
+        # wanted here, in any environment: list the real origins instead.
+        if "*" in self.cors_origins:
+            raise ValueError("CORS_ORIGINS must list origins explicitly; '*' is not allowed")
+        return self
+
+    def secret_key_problem(self) -> str | None:
+        key = self.SECRET_KEY
+        if key.strip().lower() in KNOWN_WEAK_SECRETS:
+            return "SECRET_KEY is a well-known example value"
+        if len(key) < MIN_SECRET_LENGTH:
+            return f"SECRET_KEY must be at least {MIN_SECRET_LENGTH} characters"
+        if len(set(key)) < 10:
+            return "SECRET_KEY is too repetitive to be random"
+        return None
+
+    @model_validator(mode="after")
+    def check_production(self) -> Self:
+        """In production, refuse to start with a configuration that would be
+        unsafe on the public internet. All problems are listed at once."""
+        if self.APP_ENV != "production":
+            return self
+        problems = []
+        if secret := self.secret_key_problem():
+            problems.append(
+                f"{secret}. Generate one with: "
+                'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+            )
+        if self.DOCS_ENABLED and not self.ALLOW_DOCS_IN_PRODUCTION:
+            problems.append(
+                "API docs are enabled: set DOCS_ENABLED=false, or ALLOW_DOCS_IN_PRODUCTION=true "
+                "if you really want them public"
+            )
+        if not self.RATE_LIMIT_ENABLED:
+            problems.append("RATE_LIMIT_ENABLED must be true")
+        if self.EMBEDDING_PROVIDER == "fake" or self.LLM_PROVIDER == "fake":
+            problems.append("the fake embedding/LLM providers are for development only")
+        code = self.INVITE_CODE.get_secret_value()
+        if self.REGISTRATION_MODE == "invite" and 0 < len(code) < MIN_INVITE_CODE_LENGTH:
+            problems.append(f"INVITE_CODE must be at least {MIN_INVITE_CODE_LENGTH} characters")
+        if problems:
+            raise ValueError("Refusing to start with APP_ENV=production: " + "; ".join(problems))
+        return self
 
     @model_validator(mode="after")
     def check_embedding_settings(self) -> Self:

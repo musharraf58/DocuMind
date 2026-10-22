@@ -3,8 +3,16 @@ import uuid
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import CurrentUser, EmbedderDep, LLMDep, SessionFactory
+from app.api.deps import (
+    CurrentUser,
+    EmbedderDep,
+    LLMDep,
+    QuotasDep,
+    RecorderDep,
+    SessionFactory,
+)
 from app.api.errors import provider_error
+from app.api.limits import limit_ask
 from app.core.config import get_settings
 from app.schemas.ask import AskRequest, AskResponse, Citation, Usage
 from app.services import answering
@@ -13,6 +21,7 @@ from app.services.ask_stream import stream_answer
 from app.services.conversations import ConversationBusyError
 from app.services.embeddings import EmbeddingError
 from app.services.llm import LLMError
+from app.services.quotas import QUESTIONS, Quotas
 from app.services.sse import with_heartbeats
 
 router = APIRouter(tags=["ask"])
@@ -20,7 +29,19 @@ router = APIRouter(tags=["ask"])
 BUSY = "An answer is already being generated in this conversation"
 
 
-@router.post("/collections/{collection_id}/ask", response_model=AskResponse)
+async def admit_question(quotas: Quotas, user_id: uuid.UUID) -> None:
+    """Before any work: 503 if today's global answer capacity is used up,
+    429 if the user is out of questions or embedding tokens for today. Takes
+    one question from the user's quota (given back if the question turns out
+    to be a 404 or 409)."""
+    await quotas.check_llm_capacity()
+    await quotas.check_embed_tokens(user_id)
+    await quotas.take_question(user_id)
+
+
+@router.post(
+    "/collections/{collection_id}/ask", response_model=AskResponse, dependencies=[limit_ask]
+)
 async def ask(
     collection_id: uuid.UUID,
     body: AskRequest,
@@ -28,17 +49,32 @@ async def ask(
     sessions: SessionFactory,
     embedder: EmbedderDep,
     llm: LLMDep,
+    recorder: RecorderDep,
+    quotas: QuotasDep,
 ):
     """Answer a question from the documents in one of your collections, citing
     the sources it used, and save both to a conversation (a new one unless
     conversation_id is given). grounded=false means no supplied source backs
     the answer (including "I could not find this in your documents")."""
+    await admit_question(quotas, user.id)
     try:
         answer = await ask_service.answer_question(
-            sessions, embedder, llm, user.id, collection_id, body.question, body.conversation_id
+            sessions,
+            embedder,
+            llm,
+            user.id,
+            collection_id,
+            body.question,
+            body.conversation_id,
+            recorder,
         )
     except ConversationBusyError as exc:
+        await quotas.give_back(user.id, QUESTIONS)
         raise HTTPException(status_code=409, detail=BUSY) from exc
+    except HTTPException:
+        # 404 (collection or conversation not yours) before anything was done.
+        await quotas.give_back(user.id, QUESTIONS)
+        raise
     except (EmbeddingError, LLMError) as exc:
         raise provider_error(exc) from exc
     return AskResponse(
@@ -62,7 +98,7 @@ async def ask(
     )
 
 
-@router.post("/collections/{collection_id}/ask/stream")
+@router.post("/collections/{collection_id}/ask/stream", dependencies=[limit_ask])
 async def ask_stream(
     collection_id: uuid.UUID,
     body: AskRequest,
@@ -70,6 +106,8 @@ async def ask_stream(
     sessions: SessionFactory,
     embedder: EmbedderDep,
     llm: LLMDep,
+    recorder: RecorderDep,
+    quotas: QuotasDep,
 ):
     """Like /ask, but streams the answer as server-sent events: meta, then
     token events as text is generated, then done (the final answer, with
@@ -78,13 +116,18 @@ async def ask_stream(
     Problems found before streaming starts are ordinary HTTP errors: 422 for
     the question, 404 for a collection or conversation that isn't yours,
     409 if an answer is already being generated in the conversation."""
+    await admit_question(quotas, user.id)
     try:
         turn = await answering.begin(
             sessions, user.id, collection_id, body.question, body.conversation_id
         )
     except ConversationBusyError as exc:
+        await quotas.give_back(user.id, QUESTIONS)
         raise HTTPException(status_code=409, detail=BUSY) from exc
-    events = stream_answer(sessions, embedder, llm, turn, body.question)
+    except HTTPException:
+        await quotas.give_back(user.id, QUESTIONS)
+        raise
+    events = stream_answer(sessions, embedder, llm, turn, body.question, recorder)
     return StreamingResponse(
         with_heartbeats(events, get_settings().STREAM_HEARTBEAT_SECONDS),
         media_type="text/event-stream",

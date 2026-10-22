@@ -5,7 +5,7 @@ import jwt
 from httpx import AsyncClient
 
 from app.core.config import get_settings
-from tests.helpers import PASSWORD, auth_headers, login, register
+from tests.helpers import PASSWORD, auth_headers, error_body, login, register
 
 
 async def test_register_returns_user_without_password_data(client: AsyncClient) -> None:
@@ -46,7 +46,7 @@ async def test_wrong_password_and_wrong_email_give_identical_errors(client: Asyn
     wrong_email = await login(client, "nobody@example.com")
 
     assert wrong_password.status_code == wrong_email.status_code == 401
-    assert wrong_password.json() == wrong_email.json()
+    assert error_body(wrong_password) == error_body(wrong_email)
 
 
 async def test_me_returns_current_user(client: AsyncClient) -> None:
@@ -76,7 +76,7 @@ async def test_expired_token_is_401(client: AsyncClient) -> None:
     me = (await client.get("/auth/me", headers=headers)).json()
     settings = get_settings()
     expired = jwt.encode(
-        {"sub": me["id"], "exp": int(time.time()) - 60},
+        {"sub": me["id"], "ver": 0, "exp": int(time.time()) - 60},
         settings.SECRET_KEY,
         algorithm=settings.JWT_ALGORITHM,
     )
@@ -88,7 +88,7 @@ async def test_expired_token_is_401(client: AsyncClient) -> None:
 
 async def test_token_signed_with_wrong_key_is_401(client: AsyncClient) -> None:
     forged = jwt.encode(
-        {"sub": str(uuid.uuid4()), "exp": int(time.time()) + 600},
+        {"sub": str(uuid.uuid4()), "ver": 0, "exp": int(time.time()) + 600},
         "a-completely-different-secret-key-0123456789",
         algorithm="HS256",
     )
@@ -101,7 +101,7 @@ async def test_token_signed_with_wrong_key_is_401(client: AsyncClient) -> None:
 async def test_valid_token_for_nonexistent_user_is_401(client: AsyncClient) -> None:
     settings = get_settings()
     token = jwt.encode(
-        {"sub": str(uuid.uuid4()), "exp": int(time.time()) + 600},
+        {"sub": str(uuid.uuid4()), "ver": 0, "exp": int(time.time()) + 600},
         settings.SECRET_KEY,
         algorithm=settings.JWT_ALGORITHM,
     )

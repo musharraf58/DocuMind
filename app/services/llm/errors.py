@@ -30,3 +30,12 @@ class LLMBusyError(LLMError):
 
 class LLMRefusalError(LLMError):
     """The provider declined to answer (e.g. a safety filter). Not an outage."""
+
+
+class LLMBudgetExhausted(LLMError):
+    """Today's global LLM request budget (GLOBAL_DAILY_LLM_BUDGET) is used up.
+    Not a provider failure: we stop ourselves before the free-tier quota does."""
+
+    def __init__(self, retry_after: float) -> None:
+        self.retry_after = retry_after
+        super().__init__("Daily capacity reached; please try again tomorrow")

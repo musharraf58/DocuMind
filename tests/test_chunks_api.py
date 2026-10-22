@@ -9,7 +9,7 @@ from app.services import processing
 from app.services.chunking import ChunkData
 from app.services.embeddings import EmbeddingError, FakeEmbeddingProvider
 from tests.fixtures import build_pdf
-from tests.helpers import auth_headers, create_collection, upload
+from tests.helpers import auth_headers, create_collection, error_body, upload
 
 TEXT = ("This sentence is long enough to pass the minimum text check. " * 300).encode()
 
@@ -131,7 +131,7 @@ async def test_other_users_documents_are_404(client, job_queue):
 
     assert reprocess.status_code == status.status_code == chunks.status_code == 404
     assert missing.status_code == 404
-    assert reprocess.json() == chunks.json() == missing.json()
+    assert error_body(reprocess) == error_body(chunks) == error_body(missing)
     # The intruder's attempt didn't touch the owner's document or the queue.
     owner_view = await client.get(f"/documents/{doc_id}", headers=owner_headers)
     assert owner_view.json()["status"] == "ready"

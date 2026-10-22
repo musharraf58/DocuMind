@@ -7,6 +7,8 @@ from functools import partial
 
 import anyio
 
+from app.core.request_id import get_request_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,7 +23,7 @@ class JobQueue(ABC):
 
 class CeleryJobQueue(JobQueue):
     async def enqueue(self, document_id: uuid.UUID, countdown: float | None = None) -> bool:
-        from app.workers.celery_app import PROCESS_DOCUMENT, celery_app
+        from app.workers.celery_app import PROCESS_DOCUMENT, REQUEST_ID_HEADER, celery_app
 
         send = partial(
             celery_app.send_task,
@@ -29,6 +31,8 @@ class CeleryJobQueue(JobQueue):
             args=[str(document_id)],
             countdown=countdown,
             retry=False,  # don't keep retrying the broker; the sweeper is the fallback
+            # The worker logs the job under the id of the request that queued it.
+            headers={REQUEST_ID_HEADER: get_request_id()},
         )
         try:
             # Celery's client is blocking; keep it off the event loop.
