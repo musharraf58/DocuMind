@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import ask, auth, collections, conversations, documents, health, search
+from app.api import ask, auth, collections, conversations, documents, health, search, usage
 from app.core.config import Settings, get_settings
 from app.core.database import SessionLocal
 from app.core.errors import CatchAllMiddleware, install_error_handlers
@@ -77,6 +77,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(search.router)
     app.include_router(ask.router)
     app.include_router(conversations.router)
+    app.include_router(usage.router)
     return app
 
 
