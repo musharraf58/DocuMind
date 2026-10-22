@@ -104,3 +104,21 @@ def test_chunk_that_fits_is_accepted():
 def test_retry_max_below_base_is_refused():
     with pytest.raises(ValidationError, match="RETRY_MAX"):
         make(EMBEDDING_RETRY_BASE_SECONDS=10, EMBEDDING_RETRY_MAX_SECONDS=5)
+
+
+def test_env_example_names_only_real_settings_and_loads():
+    """A typo in .env.example (or a renamed setting) would silently do nothing."""
+    from pathlib import Path
+
+    from app.core.config import Settings
+
+    example = Path(__file__).parents[1] / ".env.example"
+    names = [
+        line.split("=", 1)[0]
+        for line in example.read_text().splitlines()
+        if line and not line.startswith("#") and "=" in line
+    ]
+    unknown = sorted(set(names) - set(Settings.model_fields))
+    assert unknown == []
+    assert len(names) == len(set(names)), "a setting is listed twice"
+    Settings(_env_file=example)  # every value parses and passes validation
