@@ -6,8 +6,16 @@ Start the worker (the compose "worker" service does this):
     celery -A app.workers.celery_app worker --beat --concurrency=1
 """
 
+import threading
+
 from celery import Celery
-from celery.signals import after_setup_logger, task_postrun, task_prerun, worker_ready
+from celery.signals import (
+    after_setup_logger,
+    task_postrun,
+    task_prerun,
+    worker_ready,
+    worker_shutdown,
+)
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -88,3 +96,19 @@ def clear_request_id(**kwargs) -> None:
 def sweep_at_startup(sender=None, **kwargs) -> None:
     """Catch up right away on anything left over while the worker was down."""
     celery_app.send_task(SWEEP)
+
+
+_heartbeat_stop = threading.Event()
+
+
+@worker_ready.connect
+def start_worker_heartbeat(sender=None, **kwargs) -> None:
+    """Tell /health/ready that a worker is alive (app/workers/heartbeat.py)."""
+    from app.workers.heartbeat import start_heartbeat
+
+    start_heartbeat(settings.REDIS_URL, _heartbeat_stop)
+
+
+@worker_shutdown.connect
+def stop_worker_heartbeat(sender=None, **kwargs) -> None:
+    _heartbeat_stop.set()
