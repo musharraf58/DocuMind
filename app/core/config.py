@@ -148,6 +148,9 @@ class Settings(BaseSettings):
     # ...and treat "processing" documents with no heartbeat for this long as stuck.
     STALE_PROCESSING_MINUTES: float = Field(default=10, gt=0)
 
+    # Logging. "json": one JSON object per line, for log collectors.
+    LOG_FORMAT: Literal["text", "json"] = "text"
+
     @property
     def embedding_token_budget(self) -> int:
         """Tokens we allow ourselves per 60 seconds."""

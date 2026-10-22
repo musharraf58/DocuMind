@@ -7,6 +7,7 @@ from app.api import ask, auth, collections, conversations, documents, health, se
 from app.core.database import SessionLocal
 from app.core.limits import MaxBodySizeMiddleware
 from app.core.logging import configure_logging
+from app.core.request_id import RequestIdMiddleware
 from app.services.integrity import report_missing_embeddings
 
 # Uvicorn sets up only its own loggers. Without this, the app's INFO messages
@@ -22,6 +23,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="DocuMind", lifespan=lifespan)
 app.add_middleware(MaxBodySizeMiddleware)
+# Added last = outermost: every response, even a rejection by the middleware
+# above, carries the id.
+app.add_middleware(RequestIdMiddleware)
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(collections.router)
