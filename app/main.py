@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from app.api import ask, auth, collections, conversations, documents, health, search
 from app.core.database import SessionLocal
+from app.core.errors import CatchAllMiddleware, install_error_handlers
 from app.core.limits import MaxBodySizeMiddleware
 from app.core.logging import configure_logging
 from app.core.request_id import RequestIdMiddleware
@@ -22,9 +23,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="DocuMind", lifespan=lifespan)
+install_error_handlers(app)
+
+# Middleware: the LAST one added is the OUTERMOST, so a request passes through
+# them bottom to top, and the response top to bottom.
 app.add_middleware(MaxBodySizeMiddleware)
-# Added last = outermost: every response, even a rejection by the middleware
-# above, carries the id.
+# Unhandled exceptions become a generic 500 here, inside the middleware below,
+# so the 500 still gets the request id.
+app.add_middleware(CatchAllMiddleware)
+# Outermost: every response, even a rejection by the middleware above,
+# carries the id.
 app.add_middleware(RequestIdMiddleware)
 app.include_router(health.router)
 app.include_router(auth.router)

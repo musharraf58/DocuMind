@@ -2,7 +2,7 @@ import uuid
 
 from httpx import AsyncClient
 
-from tests.helpers import auth_headers
+from tests.helpers import auth_headers, error_body
 
 
 async def _create(client: AsyncClient, headers: dict, name: str = "Docs", **extra) -> dict:
@@ -106,7 +106,7 @@ async def test_users_cannot_see_or_touch_each_others_collections(client: AsyncCl
     missing = await client.get(f"/collections/{uuid.uuid4()}", headers=bob)
     forbidden_looking = await client.get(url, headers=bob)
     assert forbidden_looking.status_code == missing.status_code == 404
-    assert forbidden_looking.json() == missing.json()
+    assert error_body(forbidden_looking) == error_body(missing)
 
     # Bob's list doesn't include it
     assert (await client.get("/collections", headers=bob)).json() == []

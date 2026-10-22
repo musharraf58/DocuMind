@@ -9,7 +9,7 @@ from sqlalchemy import func, select, update
 
 from app.models import Collection, Message, MessageStatus
 from app.services import conversations as service
-from tests.helpers import auth_headers, create_collection
+from tests.helpers import auth_headers, create_collection, error_body
 
 
 async def owner(client, db, email="alice@example.com"):
@@ -249,7 +249,8 @@ async def test_another_user_gets_404_on_every_conversation_endpoint(client, db):
         await client.get(f"/conversations/{uuid.uuid4()}", headers=bob),
     ]
     assert [r.status_code for r in responses] == [404, 404, 404, 404]
-    assert len({r.text for r in responses}) == 1  # indistinguishable from "doesn't exist"
+    # Indistinguishable from "doesn't exist" (apart from the per-request id).
+    assert len({str(error_body(r)) for r in responses}) == 1
     assert (await client.get("/conversations", headers=bob)).json() == []
     # Nothing changed for Alice.
     still = await service.get_owned_conversation(db, turn.conversation_id, collection.owner_id)

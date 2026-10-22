@@ -5,7 +5,7 @@ import jwt
 from httpx import AsyncClient
 
 from app.core.config import get_settings
-from tests.helpers import PASSWORD, auth_headers, login, register
+from tests.helpers import PASSWORD, auth_headers, error_body, login, register
 
 
 async def test_register_returns_user_without_password_data(client: AsyncClient) -> None:
@@ -46,7 +46,7 @@ async def test_wrong_password_and_wrong_email_give_identical_errors(client: Asyn
     wrong_email = await login(client, "nobody@example.com")
 
     assert wrong_password.status_code == wrong_email.status_code == 401
-    assert wrong_password.json() == wrong_email.json()
+    assert error_body(wrong_password) == error_body(wrong_email)
 
 
 async def test_me_returns_current_user(client: AsyncClient) -> None:
