@@ -186,6 +186,11 @@ class Settings(BaseSettings):
     REGISTRATION_MODE: Literal["open", "invite", "closed"] = "invite"
     # Never logged or printed (SecretStr). Share it only with people you invite.
     INVITE_CODE: SecretStr = SecretStr("")
+    # Upload caps per user: total stored, number of documents, and documents
+    # waiting or being processed at once.
+    MAX_STORAGE_MB_PER_USER: int = Field(default=100, ge=1)
+    MAX_DOCUMENTS_PER_USER: int = Field(default=50, ge=1)
+    MAX_PENDING_DOCUMENTS_PER_USER: int = Field(default=5, ge=1)
     # Daily quotas, per user (Redis counters; the day starts at QUOTA_RESET_HOUR_UTC).
     DAILY_QUESTIONS_PER_USER: int = Field(default=50, ge=0)
     # About a 300-page book; queries count too (a few tokens each).

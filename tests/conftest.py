@@ -153,12 +153,16 @@ def no_network(monkeypatch) -> None:
 
 @pytest.fixture(autouse=True)
 def generous_quotas(monkeypatch) -> None:
-    """Daily quotas high enough never to get in the way; their tests lower them."""
+    """Daily quotas and upload caps high enough never to get in the way;
+    their tests lower them."""
     settings = get_settings()
     for name in [
         "DAILY_QUESTIONS_PER_USER",
         "DAILY_EMBED_TOKENS_PER_USER",
         "DAILY_UPLOADS_PER_USER",
         "GLOBAL_DAILY_LLM_BUDGET",
+        "MAX_STORAGE_MB_PER_USER",
+        "MAX_DOCUMENTS_PER_USER",
+        "MAX_PENDING_DOCUMENTS_PER_USER",
     ]:
         monkeypatch.setattr(settings, name, 10**9)
