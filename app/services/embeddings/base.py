@@ -94,15 +94,35 @@ class EmbeddingProvider(ABC):
         heartbeat: awaited before each attempt, so a caller can show the run
         is still alive while the rate limiter makes it wait for minutes.
         """
+        return await self._embed_many(texts, "document", "chunks", token_counts, heartbeat)
+
+    async def embed_queries(
+        self, texts: Sequence[str], heartbeat: Heartbeat | None = None
+    ) -> list[Vector]:
+        """Embed many queries at once, as queries, in as few requests as
+        possible. For offline work such as the evaluation: unlike embed_query
+        nobody is waiting, so it waits for the rate limiter as long as needed.
+        """
+        return await self._embed_many(texts, "query", "queries", None, heartbeat)
+
+    async def _embed_many(
+        self,
+        texts: Sequence[str],
+        input_type: InputType,
+        noun: str,
+        token_counts: Sequence[int] | None,
+        heartbeat: Heartbeat | None,
+    ) -> list[Vector]:
         _reject_blank(texts)
         batches = self._plan_batches(texts, token_counts)  # fails before any request is sent
         estimated_total = sum(tokens for _, tokens in batches)
         if self.limiter is not None and batches:
             seconds = estimate_seconds(estimated_total, self.limiter.document_token_budget)
             logger.info(
-                "Embedding %d chunks (~%d tokens) in %d batches; at the current rate limit "
+                "Embedding %d %s (~%d tokens) in %d batches; at the current rate limit "
                 "this takes %s",
                 len(texts),
+                noun,
                 estimated_total,
                 len(batches),
                 f"about {round(seconds / 60)} min" if seconds >= 30 else "under a minute",
@@ -112,16 +132,19 @@ class EmbeddingProvider(ABC):
         reported_total = 0
         waited_total = 0.0
         for number, (batch, estimated) in enumerate(batches, start=1):
+            # Bulk work of either input type draws on the bulk ("document")
+            # share of the rate limit, leaving the reserve for live searches.
             result, waited = await self._send(
-                batch, "document", estimated, "document", heartbeat=heartbeat
+                batch, input_type, estimated, "document", heartbeat=heartbeat
             )
             vectors.extend(result.vectors)
             reported_total += result.total_tokens
             waited_total += waited
             logger.info(
-                "embedded %d/%d chunks (batch %d/%d: ~%d tokens estimated, %s, waited %.1fs)",
+                "embedded %d/%d %s (batch %d/%d: ~%d tokens estimated, %s, waited %.1fs)",
                 len(vectors),
                 len(texts),
+                noun,
                 number,
                 len(batches),
                 estimated,
@@ -140,9 +163,10 @@ class EmbeddingProvider(ABC):
                     self.token_budget,
                 )
         logger.info(
-            "Embedding finished: %d chunks, %d requests, waited %.0fs; tokens ~%d estimated, "
+            "Embedding finished: %d %s, %d requests, waited %.0fs; tokens ~%d estimated, "
             "%s (model %s)",
             len(texts),
+            noun,
             len(batches),
             waited_total,
             sum(tokens for _, tokens in batches),

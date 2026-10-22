@@ -127,7 +127,9 @@ async def test_empty_collection_means_no_llm_call(client, embedder, llm):
 
 async def test_threshold_is_the_setting(client, embedder, llm, monkeypatch):
     headers, collection_id = await setup(client, {"mixed.txt": about("cats and databases")})
-    # The mixed document is ~0.29 away from a cats question.
+    # The mixed document is ~0.29 away from a cats question. Slack off: this is
+    # about the distance threshold alone (the keyword path: test_relevance.py).
+    monkeypatch.setattr(get_settings(), "RAG_KEYWORD_GATE_SLACK", 0.0)
     monkeypatch.setattr(get_settings(), "RAG_MAX_DISTANCE", 0.2)
     assert (await ask(client, headers, collection_id, "cats")).json()["grounded"] is False
     assert llm.calls == []

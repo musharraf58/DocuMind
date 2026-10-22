@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import Settings, get_settings
 from app.models import MessageStatus
 from app.services import collections as collection_service
-from app.services import retrieval
+from app.services import relevance, retrieval
 from app.services.citations import CheckedAnswer, check_citations
 from app.services.context import Source, assemble_context
 from app.services.conversations import Turn, finish_turn, start_turn
@@ -96,12 +96,20 @@ async def find_sources(
             rewrite.completion_tokens,
         )
     vector = await embedder.embed_query(rewrite.question)  # one Voyage request
+    options = retrieval.SearchOptions.from_settings(settings)
     async with sessions() as db:
-        chunks = await retrieval.search_by_vector(
-            db, turn.owner_id, turn.collection_id, embedder.model, vector, settings.RAG_TOP_K
+        chunks = await retrieval.search_chunks(
+            db, turn.owner_id, turn.collection_id, embedder.model, vector, rewrite.question, options
         )
-    relevant = retrieval.filter_relevant(chunks, settings.RAG_MAX_DISTANCE)
-    sources = assemble_context(relevant, settings.RAG_CONTEXT_TOKEN_BUDGET) if relevant else []
+    hybrid = options.mode == "hybrid"
+    kept = relevance.relevant(
+        chunks, settings.RAG_MAX_DISTANCE, settings.RAG_KEYWORD_GATE_SLACK, hybrid
+    )
+    # Hybrid results are already in fused order; re-sorting by distance would
+    # undo it (and push keyword-only finds to where the budget cuts first).
+    sources = (
+        assemble_context(kept, settings.RAG_CONTEXT_TOKEN_BUDGET, keep_order=hybrid) if kept else []
+    )
     return Sources(sources, rewrite, len(chunks))
 
 
