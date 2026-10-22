@@ -175,6 +175,16 @@ class Settings(BaseSettings):
     # ...and treat "processing" documents with no heartbeat for this long as stuck.
     STALE_PROCESSING_MINUTES: float = Field(default=10, gt=0)
 
+    # Database connections (API process). See app/core/database.py.
+    DB_POOL_SIZE: int = Field(default=5, ge=1)
+    DB_MAX_OVERFLOW: int = Field(default=10, ge=0)
+    DB_POOL_TIMEOUT_SECONDS: float = Field(default=10, gt=0)
+    # Postgres cancels any single statement running longer than this. The
+    # slowest measured API query (vector search, 10,000 chunks) takes ~0.1 s.
+    DB_STATEMENT_TIMEOUT_MS: int = Field(default=15_000, ge=100)
+    # The worker writes a whole document's chunks and vectors in one go.
+    DB_WORKER_STATEMENT_TIMEOUT_MS: int = Field(default=300_000, ge=100)
+
     # Logging. "json": one JSON object per line, for log collectors.
     LOG_FORMAT: Literal["text", "json"] = "text"
 

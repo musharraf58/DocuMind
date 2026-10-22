@@ -10,10 +10,11 @@ import asyncio
 import logging
 import uuid
 
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
+from app.core.database import make_engine
 from app.core.redis import make_redis
 from app.services import jobs, sweeper
 from app.services.embeddings import EmbeddingError, get_embedding_provider
@@ -27,7 +28,11 @@ logger = logging.getLogger(__name__)
 
 def _engine():
     # NullPool: no connections kept around between tasks (each has its own loop).
-    return create_async_engine(get_settings().DATABASE_URL, poolclass=NullPool)
+    # A longer statement timeout than the API's: storing a large document's
+    # chunks and vectors is one big write.
+    return make_engine(
+        statement_timeout_ms=get_settings().DB_WORKER_STATEMENT_TIMEOUT_MS, poolclass=NullPool
+    )
 
 
 @celery_app.task(name=PROCESS_DOCUMENT)
