@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -14,6 +15,8 @@ from app.core.logging import configure_logging
 from app.core.request_id import HEADER as REQUEST_ID_HEADER
 from app.core.request_id import RequestIdMiddleware
 from app.services.integrity import report_missing_embeddings
+
+logger = logging.getLogger(__name__)
 
 # Uvicorn sets up only its own loggers. Without this, the app's INFO messages
 # (e.g. "embedded N chunks") are silently dropped.
@@ -37,6 +40,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
+    # Production refuses a weak key outright (Settings.check_production).
+    if problem := settings.secret_key_problem():
+        logger.warning("%s: fine for development, refused when APP_ENV=production", problem)
     docs = settings.DOCS_ENABLED
     app = FastAPI(
         title="DocuMind",

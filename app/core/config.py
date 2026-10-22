@@ -9,13 +9,40 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # queries can still get through while a long document is being embedded.
 QUERY_RESERVE_FRACTION = 0.05
 
+# SECRET_KEY signs every login token: whoever knows it can sign a token for
+# any user. These are values from examples and tutorials that people forget
+# to change (compared case-insensitively).
+KNOWN_WEAK_SECRETS = {
+    "change-me",
+    "changeme",
+    "change_me",
+    "please-change-me",
+    "secret",
+    "secret-key",
+    "secret_key",
+    "your-secret-key",
+    "your_secret_key",
+    "supersecret",
+    "dev",
+    "development",
+    "test",
+    "password",
+    "documind",
+}
+MIN_SECRET_LENGTH = 32
+MIN_INVITE_CODE_LENGTH = 12
+
 
 class Settings(BaseSettings):
     """App configuration. Values come from environment variables, then .env."""
 
     # env_ignore_empty: "NAME=" with nothing after it means "use the default",
     # rather than an empty string that may not even parse (e.g. as a number).
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_ignore_empty=True)
+    # hide_input_in_errors: a validation error would otherwise print every input
+    # value, API keys and SECRET_KEY included, into the startup log.
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", env_ignore_empty=True, hide_input_in_errors=True
+    )
 
     DATABASE_URL: str
     REDIS_URL: str
@@ -269,6 +296,44 @@ class Settings(BaseSettings):
         # wanted here, in any environment: list the real origins instead.
         if "*" in self.cors_origins:
             raise ValueError("CORS_ORIGINS must list origins explicitly; '*' is not allowed")
+        return self
+
+    def secret_key_problem(self) -> str | None:
+        key = self.SECRET_KEY
+        if key.strip().lower() in KNOWN_WEAK_SECRETS:
+            return "SECRET_KEY is a well-known example value"
+        if len(key) < MIN_SECRET_LENGTH:
+            return f"SECRET_KEY must be at least {MIN_SECRET_LENGTH} characters"
+        if len(set(key)) < 10:
+            return "SECRET_KEY is too repetitive to be random"
+        return None
+
+    @model_validator(mode="after")
+    def check_production(self) -> Self:
+        """In production, refuse to start with a configuration that would be
+        unsafe on the public internet. All problems are listed at once."""
+        if self.APP_ENV != "production":
+            return self
+        problems = []
+        if secret := self.secret_key_problem():
+            problems.append(
+                f"{secret}. Generate one with: "
+                'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+            )
+        if self.DOCS_ENABLED and not self.ALLOW_DOCS_IN_PRODUCTION:
+            problems.append(
+                "API docs are enabled: set DOCS_ENABLED=false, or ALLOW_DOCS_IN_PRODUCTION=true "
+                "if you really want them public"
+            )
+        if not self.RATE_LIMIT_ENABLED:
+            problems.append("RATE_LIMIT_ENABLED must be true")
+        if self.EMBEDDING_PROVIDER == "fake" or self.LLM_PROVIDER == "fake":
+            problems.append("the fake embedding/LLM providers are for development only")
+        code = self.INVITE_CODE.get_secret_value()
+        if self.REGISTRATION_MODE == "invite" and 0 < len(code) < MIN_INVITE_CODE_LENGTH:
+            problems.append(f"INVITE_CODE must be at least {MIN_INVITE_CODE_LENGTH} characters")
+        if problems:
+            raise ValueError("Refusing to start with APP_ENV=production: " + "; ".join(problems))
         return self
 
     @model_validator(mode="after")
