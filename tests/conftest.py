@@ -13,6 +13,7 @@ from sqlalchemy.pool import NullPool
 from app.api.deps import get_session_factory
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.rate_limit import memory_fallback
 from app.core.redis import get_redis
 from app.main import app
 from app.models import Base
@@ -117,6 +118,20 @@ def fake_embeddings(monkeypatch) -> None:
     """Every test embeds with the fake provider unless it builds its own."""
     monkeypatch.setattr(get_settings(), "EMBEDDING_PROVIDER", "fake")
     monkeypatch.setattr(get_settings(), "LLM_PROVIDER", "fake")
+
+
+GENEROUS = "100000/minute"
+
+
+@pytest.fixture(autouse=True)
+def generous_limits(monkeypatch) -> None:
+    """Limits stay switched on (so their code runs in every test) but high
+    enough never to get in the way. Tests of a limit lower it themselves."""
+    settings = get_settings()
+    for name in type(settings).model_fields:
+        if name.startswith("RATE_LIMIT_") and name != "RATE_LIMIT_ENABLED":
+            monkeypatch.setattr(settings, name, GENEROUS)
+    memory_fallback.clear()  # in-process state must not leak between tests
 
 
 @pytest.fixture(autouse=True)

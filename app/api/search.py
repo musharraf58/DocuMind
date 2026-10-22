@@ -4,13 +4,14 @@ from fastapi import APIRouter
 
 from app.api.deps import CurrentUser, DbSession, EmbedderDep
 from app.api.errors import provider_error
+from app.api.limits import limit_default
 from app.core.config import get_settings
 from app.schemas.search import SearchRequest, SearchResult
 from app.services import collections as collection_service
 from app.services import retrieval
 from app.services.embeddings import EmbeddingError
 
-router = APIRouter(tags=["search"])
+router = APIRouter(tags=["search"], dependencies=[limit_default])
 
 
 # A debugging view: the chunks retrieval finds for a query, with their

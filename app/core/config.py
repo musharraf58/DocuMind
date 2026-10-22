@@ -2,7 +2,7 @@ import math
 from functools import lru_cache
 from typing import Literal, Self
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Share of the token budget held back from document embedding so that search
@@ -162,6 +162,18 @@ class Settings(BaseSettings):
     # address and ignore X-Forwarded-For (which any client can forge). N: the
     # client is the Nth address from the right in X-Forwarded-For.
     TRUSTED_PROXY_COUNT: int = Field(default=0, ge=0, le=10)
+    # Inbound rate limits ("N/second|minute|hour|day"), per endpoint class. See
+    # the README's "Security and Limits" for why each is what it is.
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_LOGIN_PER_IP: str = "10/minute"
+    RATE_LIMIT_LOGIN_PER_EMAIL: str = "5/minute"
+    RATE_LIMIT_REGISTER_PER_IP: str = "5/hour"
+    # Changing the password, deleting the account (per user).
+    RATE_LIMIT_ACCOUNT: str = "5/minute"
+    RATE_LIMIT_ASK: str = "10/minute"
+    RATE_LIMIT_UPLOAD: str = "10/hour"
+    # Every other authenticated endpoint.
+    RATE_LIMIT_DEFAULT: str = "120/minute"
     # Interactive API docs (/docs, /redoc, /openapi.json).
     DOCS_ENABLED: bool = True
     # In production, docs stay refused unless this explicit opt-in is set too.
@@ -208,6 +220,22 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
+    @field_validator(
+        "RATE_LIMIT_LOGIN_PER_IP",
+        "RATE_LIMIT_LOGIN_PER_EMAIL",
+        "RATE_LIMIT_REGISTER_PER_IP",
+        "RATE_LIMIT_ACCOUNT",
+        "RATE_LIMIT_ASK",
+        "RATE_LIMIT_UPLOAD",
+        "RATE_LIMIT_DEFAULT",
+    )
+    @classmethod
+    def check_rate(cls, value: str) -> str:
+        from app.core.rate_limit import Rate
+
+        Rate.parse(value)  # a typo fails at startup, not on the first request
+        return value
 
     @model_validator(mode="after")
     def check_cors(self) -> Self:

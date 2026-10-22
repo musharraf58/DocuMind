@@ -5,6 +5,7 @@ from fastapi.responses import StreamingResponse
 
 from app.api.deps import CurrentUser, EmbedderDep, LLMDep, SessionFactory
 from app.api.errors import provider_error
+from app.api.limits import limit_ask
 from app.core.config import get_settings
 from app.schemas.ask import AskRequest, AskResponse, Citation, Usage
 from app.services import answering
@@ -20,7 +21,9 @@ router = APIRouter(tags=["ask"])
 BUSY = "An answer is already being generated in this conversation"
 
 
-@router.post("/collections/{collection_id}/ask", response_model=AskResponse)
+@router.post(
+    "/collections/{collection_id}/ask", response_model=AskResponse, dependencies=[limit_ask]
+)
 async def ask(
     collection_id: uuid.UUID,
     body: AskRequest,
@@ -62,7 +65,7 @@ async def ask(
     )
 
 
-@router.post("/collections/{collection_id}/ask/stream")
+@router.post("/collections/{collection_id}/ask/stream", dependencies=[limit_ask])
 async def ask_stream(
     collection_id: uuid.UUID,
     body: AskRequest,

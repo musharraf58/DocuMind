@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Query, Response, UploadFile, statu
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import CurrentUser, DbSession, QueueDep, StorageDep
+from app.api.limits import limit_default, limit_upload
 from app.models import DocumentStatus
 from app.schemas.chunk import ChunkRead
 from app.schemas.document import DocumentRead
@@ -19,6 +20,7 @@ router = APIRouter(tags=["documents"])
     "/collections/{collection_id}/documents",
     response_model=DocumentRead,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[limit_upload],
 )
 async def upload_document(
     collection_id: uuid.UUID,
@@ -38,7 +40,11 @@ async def upload_document(
     return document
 
 
-@router.get("/collections/{collection_id}/documents", response_model=list[DocumentRead])
+@router.get(
+    "/collections/{collection_id}/documents",
+    response_model=list[DocumentRead],
+    dependencies=[limit_default],
+)
 async def list_documents(
     collection_id: uuid.UUID,
     db: DbSession,
@@ -51,7 +57,7 @@ async def list_documents(
     return await document_service.list_documents(db, collection, status_filter, limit, offset)
 
 
-@router.get("/documents/{document_id}", response_model=DocumentRead)
+@router.get("/documents/{document_id}", response_model=DocumentRead, dependencies=[limit_default])
 async def get_document(document_id: uuid.UUID, db: DbSession, user: CurrentUser):
     return await document_service.get_owned_document(db, document_id, user.id)
 
@@ -66,7 +72,7 @@ def _content_disposition(filename: str) -> str:
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
 
 
-@router.get("/documents/{document_id}/download")
+@router.get("/documents/{document_id}/download", dependencies=[limit_default])
 async def download_document(
     document_id: uuid.UUID, db: DbSession, user: CurrentUser, storage: StorageDep
 ):
@@ -87,7 +93,11 @@ async def download_document(
     )
 
 
-@router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/documents/{document_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[limit_default],
+)
 async def delete_document(
     document_id: uuid.UUID, db: DbSession, user: CurrentUser, storage: StorageDep
 ):
@@ -100,6 +110,7 @@ async def delete_document(
     "/documents/{document_id}/reprocess",
     response_model=DocumentRead,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[limit_default],
 )
 async def reprocess_document(
     document_id: uuid.UUID, db: DbSession, user: CurrentUser, queue: QueueDep
@@ -113,7 +124,11 @@ async def reprocess_document(
     return document
 
 
-@router.get("/documents/{document_id}/chunks", response_model=list[ChunkRead])
+@router.get(
+    "/documents/{document_id}/chunks",
+    response_model=list[ChunkRead],
+    dependencies=[limit_default],
+)
 async def list_chunks(
     document_id: uuid.UUID,
     db: DbSession,

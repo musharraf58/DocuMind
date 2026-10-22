@@ -4,6 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query, Response, status
 
 from app.api.deps import CurrentUser, DbSession
+from app.api.limits import limit_default
 from app.schemas.conversation import (
     ConversationDetail,
     ConversationRead,
@@ -12,7 +13,7 @@ from app.schemas.conversation import (
 )
 from app.services import conversations as conversation_service
 
-router = APIRouter(tags=["conversations"])
+router = APIRouter(tags=["conversations"], dependencies=[limit_default])
 
 
 @router.get("/conversations", response_model=list[ConversationRead])
