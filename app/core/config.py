@@ -151,6 +151,18 @@ class Settings(BaseSettings):
     # Logging. "json": one JSON object per line, for log collectors.
     LOG_FORMAT: Literal["text", "json"] = "text"
 
+    # "production" turns on strict startup checks (see check_production) and HSTS.
+    APP_ENV: Literal["development", "production"] = "development"
+    # Browser origins allowed to call the API, comma-separated, e.g.
+    # "https://app.example.com". Empty: no cross-origin browser access. "*" is refused.
+    CORS_ORIGINS: str = ""
+    # Largest request body for everything except uploads (JSON bodies are tiny).
+    MAX_REQUEST_BODY_KB: int = Field(default=64, ge=1)
+    # Interactive API docs (/docs, /redoc, /openapi.json).
+    DOCS_ENABLED: bool = True
+    # In production, docs stay refused unless this explicit opt-in is set too.
+    ALLOW_DOCS_IN_PRODUCTION: bool = False
+
     @property
     def embedding_token_budget(self) -> int:
         """Tokens we allow ourselves per 60 seconds."""
@@ -188,6 +200,18 @@ class Settings(BaseSettings):
     def embedding_document_token_budget(self) -> int:
         """Largest batch of document text: the budget minus the queries' share."""
         return self.embedding_token_budget - self.embedding_query_reserve_tokens
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
+    @model_validator(mode="after")
+    def check_cors(self) -> Self:
+        # "*" lets any website call the API from its visitors' browsers. Never
+        # wanted here, in any environment: list the real origins instead.
+        if "*" in self.cors_origins:
+            raise ValueError("CORS_ORIGINS must list origins explicitly; '*' is not allowed")
+        return self
 
     @model_validator(mode="after")
     def check_embedding_settings(self) -> Self:
