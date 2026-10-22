@@ -30,20 +30,20 @@ uv run python -m eval.sweep --mode hybrid --keyword-slack 0.1 --start 0.5 --stop
 
 All at the old threshold `RAG_MAX_DISTANCE=0.72`, with no keyword slack. Hit rates
 and false rejections are over the 17 answerable questions; "Rejected" is over the 4
-unanswerable ones. MRR shows n/a until `mrr()` is implemented.
+unanswerable ones. MRR doesn't depend on the gate.
 
 | Experiment | Chunks | hit@1 | hit@3 | hit@5 | MRR | False rej. | Rejected |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| vector | 47 | 76% | 94% | 100% | n/a | 6% | 25% |
-| keyword strict | 47 | 24% | 24% | 24% | n/a | 82% | 100% |
-| keyword loose | 47 | 47% | 76% | 82% | n/a | 6% | 50% |
-| hybrid strict | 47 | 76% | 94% | 100% | n/a | 6% | 25% |
-| hybrid loose | 47 | 82% | 82% | 88% | n/a | 6% | 25% |
-| hybrid loose, `simple` | 47 | 76% | 82% | 82% | n/a | 6% | 50% |
-| vector, 300 tokens | 51 | 82% | 94% | 100% | n/a | 6% | 25% |
-| hybrid loose, 300 | 51 | 82% | 82% | 88% | n/a | 6% | 25% |
-| vector, 800 tokens | 46 | 82% | 94% | 100% | n/a | 6% | 25% |
-| hybrid loose, 800 | 46 | 76% | 82% | 88% | n/a | 6% | 25% |
+| vector | 47 | 76% | 94% | 100% | 0.858 | 6% | 25% |
+| keyword strict | 47 | 24% | 24% | 24% | 0.235 | 82% | 100% |
+| keyword loose | 47 | 47% | 76% | 82% | 0.611 | 6% | 50% |
+| hybrid strict | 47 | 76% | 94% | 100% | 0.858 | 6% | 25% |
+| hybrid loose | 47 | 82% | 82% | 88% | 0.850 | 6% | 25% |
+| hybrid loose, `simple` | 47 | 76% | 82% | 82% | 0.815 | 6% | 50% |
+| vector, 300 tokens | 51 | 82% | 94% | 100% | 0.887 | 6% | 25% |
+| hybrid loose, 300 | 51 | 82% | 82% | 88% | 0.847 | 6% | 25% |
+| vector, 800 tokens | 46 | 82% | 94% | 100% | 0.887 | 6% | 25% |
+| hybrid loose, 800 | 46 | 76% | 82% | 88% | 0.821 | 6% | 25% |
 
 With 17 answerable questions, one question is 6 percentage points. Differences of
 one question are noise, not findings.
@@ -184,4 +184,3 @@ costs one Gemini call, and usually ends in "the documents don't say".
 - **Distances are model-specific.** After changing `EMBEDDING_MODEL`, the threshold
   must be measured again; the cache keys by model, so the old vectors are simply
   not reused.
-- **MRR** isn't reported until `eval/metrics.py: mrr()` is implemented.

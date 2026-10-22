@@ -46,14 +46,10 @@ def mrr(ranks: Sequence[Rank]) -> float:
     Unlike hit@k, MRR rewards putting the right chunk *higher*: rank 1 is
     worth 1, rank 2 only 0.5, rank 10 only 0.1.
 
-    Raise ValueError for an empty list or a rank below 1
-    (_check_ranks does exactly that).
-
-    TODO(you): implement this. tests/test_eval_metrics.py has the cases;
-    they fail until you do. Until then the report prints
-    "MRR: not implemented yet".
+    Raises ValueError for an empty list or a rank below 1.
     """
-    raise NotImplementedError("mrr() is left for you to implement; see its docstring")
+    _check_ranks(ranks)
+    return sum(1 / rank for rank in ranks if rank is not None) / len(ranks)
 
 
 def rejection_rate(outcomes: Sequence[Outcome]) -> float:

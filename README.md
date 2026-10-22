@@ -645,9 +645,6 @@ docker compose exec api pytest -q
 docker compose exec api ruff check .
 ```
 
-**Five tests fail on purpose**: `tests/test_eval_metrics.py` checks `mrr()` in
-`eval/metrics.py`, which is left as an exercise. They pass once it is implemented.
-
 If those commands report `executable file not found`, the container is running an older
 image: run `docker compose up -d --build` once to rebuild it.
 

@@ -323,7 +323,7 @@ def score(
     metrics: dict[str, Any] = {}
     if ranks:
         metrics |= {f"hit@{k}": hit_rate_at_k(ranks, k) for k in KS}
-        metrics["mrr"] = _mrr_or_none(ranks)
+        metrics["mrr"] = mrr(ranks)
         metrics["false_rejection_rate"] = false_rejection_rate(outcomes)
     if any(not o.answerable for o in outcomes):
         metrics["rejection_rate"] = rejection_rate(outcomes)
@@ -340,13 +340,6 @@ def score(
             entry["false_rejection_rate"] = false_rejection_rate([o for _, o in group])
         by_type[kind] = entry
     return {"metrics": metrics, "by_type": by_type}
-
-
-def _mrr_or_none(ranks: Sequence[int | None]) -> float | None:
-    try:
-        return mrr(ranks)
-    except NotImplementedError:
-        return None
 
 
 def question_record(result: QuestionResult, config: EvalConfig) -> dict[str, Any]:
@@ -426,10 +419,7 @@ def format_report(report: dict[str, Any]) -> str:
             + f" {_percent(values.get('rejection_rate')):>9}"
         )
     lines.append("")
-    if metrics.get("mrr") is None:
-        lines.append("MRR: not implemented yet (eval/metrics.py)")
-    else:
-        lines.append(f"MRR: {metrics['mrr']:.3f}")
+    lines.append(f"MRR: {metrics['mrr']:.3f}")
 
     failures = [r for r in report["results"] if r["failed"]]
     lines += ["", f"Failed questions: {len(failures)}"]

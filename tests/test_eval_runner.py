@@ -89,10 +89,10 @@ async def test_report_has_config_metrics_and_every_question(session_factory, inn
         "false_rejection_rate",
         "rejection_rate",
     }
-    assert report["metrics"]["mrr"] is None  # until mrr() is implemented
+    assert 0 < report["metrics"]["mrr"] <= 1
     assert [r["id"] for r in report["results"]] == [q.id for q in load_questions()]
     assert report["corpus"]["documents"] == len(corpus_files())
-    assert "MRR: not implemented yet" in runner.format_report(report)
+    assert "MRR: " in runner.format_report(report)
 
 
 async def test_eval_data_lives_with_the_eval_user_and_nothing_is_left_pending(
