@@ -3,7 +3,7 @@ import json
 import logging
 from types import SimpleNamespace
 
-from app.core.logging import JsonFormatter, RequestIdFilter
+from app.core.logging import JsonFormatter, configure_logging
 from app.core.request_id import accept_or_generate, get_request_id, set_request_id
 from app.workers.celery_app import REQUEST_ID_HEADER, clear_request_id, use_request_id
 
@@ -46,10 +46,10 @@ def test_accept_or_generate():
 
 
 def _log_line(formatter: logging.Formatter) -> str:
+    configure_logging("text")  # installs the record factory that adds request_id
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
     handler.setFormatter(formatter)
-    handler.addFilter(RequestIdFilter())
     logger = logging.getLogger("test.request_id")
     logger.addHandler(handler)
     logger.propagate = False

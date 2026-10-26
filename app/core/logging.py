@@ -4,14 +4,21 @@ import logging
 from app.core.request_id import get_request_id
 
 TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s [%(request_id)s] - %(message)s"
+# Loggers that carry their own handlers (and don't pass records on to the root
+# logger): uvicorn's server and access log, Celery's task log. Their handlers
+# get our formatter, or their lines would have no request id.
+OWN_HANDLER_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access", "celery.task")
+
+_original_factory = logging.getLogRecordFactory()
 
 
-class RequestIdFilter(logging.Filter):
-    """Adds record.request_id ("-" outside a request) to every log record."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        record.request_id = get_request_id() or "-"
-        return True
+def _record_factory(*args, **kwargs) -> logging.LogRecord:
+    """Every log record, from any logger and any handler, gets request_id
+    ("-" outside a request) the moment it is created. A filter on one
+    handler would miss records that go to other handlers."""
+    record = _original_factory(*args, **kwargs)
+    record.request_id = get_request_id() or "-"
+    return record
 
 
 class JsonFormatter(logging.Formatter):
@@ -30,6 +37,15 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(entry, ensure_ascii=False)
 
 
+def make_formatter(log_format: str) -> logging.Formatter:
+    return JsonFormatter() if log_format == "json" else logging.Formatter(TEXT_FORMAT)
+
+
+def apply_formatter(logger: logging.Logger, formatter: logging.Formatter) -> None:
+    for handler in logger.handlers:
+        handler.setFormatter(formatter)
+
+
 def configure_logging(log_format: str | None = None) -> None:
     """Show the app's INFO messages (job progress, sweeper actions, embedding
     batches) with timestamps and the request id; libraries stay at WARNING.
@@ -39,12 +55,10 @@ def configure_logging(log_format: str | None = None) -> None:
         from app.core.config import get_settings
 
         log_format = get_settings().LOG_FORMAT
+    logging.setLogRecordFactory(_record_factory)
     logging.basicConfig(level=logging.WARNING)
-    formatter = JsonFormatter() if log_format == "json" else logging.Formatter(TEXT_FORMAT)
-    for handler in logging.getLogger().handlers:
-        handler.setFormatter(formatter)
-        # On the handler, not a logger: records from every logger (ours,
-        # uvicorn's, Celery's) pass through the root handlers.
-        if not any(isinstance(f, RequestIdFilter) for f in handler.filters):
-            handler.addFilter(RequestIdFilter())
+    formatter = make_formatter(log_format)
+    apply_formatter(logging.getLogger(), formatter)
+    for name in OWN_HANDLER_LOGGERS:
+        apply_formatter(logging.getLogger(name), formatter)
     logging.getLogger("app").setLevel(logging.INFO)

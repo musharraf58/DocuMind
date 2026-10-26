@@ -11,6 +11,7 @@ import threading
 from celery import Celery
 from celery.signals import (
     after_setup_logger,
+    after_setup_task_logger,
     task_postrun,
     task_prerun,
     worker_ready,
@@ -61,6 +62,7 @@ celery_app.conf.update(
 )
 
 
+@after_setup_task_logger.connect
 @after_setup_logger.connect
 def show_app_logs(**kwargs) -> None:
     """Without this, the job's and the sweeper's INFO messages would be dropped:
