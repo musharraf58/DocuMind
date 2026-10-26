@@ -14,6 +14,7 @@ from app.schemas.document import DocumentRead
 from app.services import collections as collection_service
 from app.services import documents as document_service
 from app.services.quotas import UPLOADS
+from app.services.storage import StorageError
 from app.services.upload_caps import MB, check_upload_caps, storage_full
 
 router = APIRouter(tags=["documents"])
@@ -58,8 +59,9 @@ async def upload_document(
             storage_left,
             lambda: storage_full(limit_bytes, limit_bytes - storage_left),
         )
-    except HTTPException:
-        # Refused (type, size, duplicate...): it doesn't count as an upload.
+    except (HTTPException, StorageError):
+        # Refused (type, size, duplicate...) or the storage failed: it
+        # doesn't count as an upload.
         await quotas.give_back(user_id, UPLOADS)
         raise
     await queue.enqueue(document.id)  # if this fails, the sweeper enqueues it later

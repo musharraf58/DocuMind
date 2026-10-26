@@ -36,13 +36,14 @@ from app.services.embeddings import (
 )
 from app.services.extraction import ExtractionError
 from app.services.processing import ClaimLostError, ours, run_pipeline
-from app.services.storage import StorageBackend
+from app.services.storage import StorageBackend, StorageError
 from app.services.usage import UsageRecorder
 
 logger = logging.getLogger(__name__)
 
 GENERIC_ERROR = "Could not read this file"
 MAX_ERROR_LENGTH = 500
+UNREACHABLE = (OperationalError, InterfaceError, RedisError, ConnectionError, StorageError)
 
 
 class Outcome(StrEnum):
@@ -77,8 +78,8 @@ def classify(exc: BaseException) -> Failure:
         return Failure(True, str(exc))
     if isinstance(exc, TimeoutError):
         return Failure(True, "Processing took too long and was stopped; it will be retried")
-    if isinstance(exc, OperationalError | InterfaceError | RedisError | ConnectionError):
-        # The database or Redis was briefly unreachable.
+    if isinstance(exc, UNREACHABLE):
+        # The database, Redis or the file storage was briefly unreachable.
         return Failure(True, "A temporary problem interrupted processing; it will be retried")
     if isinstance(exc, ExtractionError | EmbeddingError):
         # Scanned or corrupt file, unsupported type, over a limit, chunk too

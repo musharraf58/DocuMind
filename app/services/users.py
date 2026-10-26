@@ -112,8 +112,7 @@ async def delete_account(
     keys = (
         await db.scalars(select(Document.storage_key).where(Document.owner_id == user_id))
     ).all()
-    for key in keys:
-        await storage.delete(key)
+    await storage.delete_many(keys)
     await db.delete(user)
     await db.commit()
     try:

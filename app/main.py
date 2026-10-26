@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import ask, auth, collections, conversations, documents, health, search, usage
+from app.api.errors import storage_unavailable
 from app.core.config import Settings, get_settings
 from app.core.database import SessionLocal
 from app.core.errors import CatchAllMiddleware, install_error_handlers
@@ -15,6 +16,7 @@ from app.core.logging import configure_logging
 from app.core.request_id import HEADER as REQUEST_ID_HEADER
 from app.core.request_id import RequestIdMiddleware
 from app.services.integrity import report_missing_embeddings
+from app.services.storage import StorageError
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/openapi.json" if docs else None,
     )
     install_error_handlers(app)
+    app.add_exception_handler(StorageError, storage_unavailable)
 
     # Middleware: the LAST one added is the OUTERMOST, so a request passes
     # through them bottom to top, and the response top to bottom.

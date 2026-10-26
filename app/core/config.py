@@ -64,8 +64,19 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     ANTHROPIC_API_KEY: str = ""
-    # Where uploaded files live. In Docker this is a mounted named volume.
+    # Where uploaded files live. "local": the directory STORAGE_PATH (in
+    # Docker Compose a named volume). "s3": an S3-compatible bucket (R2, B2,
+    # MinIO, AWS); required where the disk is ephemeral, e.g. Render's free tier.
+    STORAGE_BACKEND: Literal["local", "s3"] = "local"
     STORAGE_PATH: str = "./storage"
+    # Empty endpoint: AWS itself. R2: https://<account id>.r2.cloudflarestorage.com
+    # B2: https://s3.<region>.backblazeb2.com
+    S3_ENDPOINT_URL: str = ""
+    S3_BUCKET: str = ""
+    S3_ACCESS_KEY_ID: SecretStr = SecretStr("")
+    S3_SECRET_ACCESS_KEY: SecretStr = SecretStr("")
+    # R2: "auto"; B2: the region in the endpoint, e.g. "us-west-004".
+    S3_REGION: str = "us-east-1"
     MAX_UPLOAD_MB: int = 20
 
     # Chunking. Tokens are counted with tiktoken's cl100k_base as an approximation.
@@ -376,6 +387,22 @@ class Settings(BaseSettings):
             problems.append(f"INVITE_CODE must be at least {MIN_INVITE_CODE_LENGTH} characters")
         if problems:
             raise ValueError("Refusing to start with APP_ENV=production: " + "; ".join(problems))
+        return self
+
+    @model_validator(mode="after")
+    def check_storage(self) -> Self:
+        if self.STORAGE_BACKEND == "s3":
+            missing = [
+                name
+                for name, value in (
+                    ("S3_BUCKET", self.S3_BUCKET),
+                    ("S3_ACCESS_KEY_ID", self.S3_ACCESS_KEY_ID.get_secret_value()),
+                    ("S3_SECRET_ACCESS_KEY", self.S3_SECRET_ACCESS_KEY.get_secret_value()),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError("STORAGE_BACKEND=s3 needs " + ", ".join(missing))
         return self
 
     @model_validator(mode="after")
