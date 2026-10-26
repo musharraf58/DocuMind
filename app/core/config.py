@@ -213,6 +213,14 @@ class Settings(BaseSettings):
     # ...and treat "processing" documents with no heartbeat for this long as stuck.
     STALE_PROCESSING_MINUTES: float = Field(default=10, gt=0)
 
+    # Capacity guard: refuse new uploads once the database is this big (MB;
+    # 0 = no limit). Ask, search and reading keep working. Neon's free tier
+    # caps storage; see app/services/capacity.py.
+    MAX_DB_SIZE_MB: int = Field(default=400, ge=0)
+    # Delete ordinary (non-demo) accounts older than this many days, with
+    # everything they own (0 = never). Runs with the periodic maintenance.
+    RETENTION_DAYS: int = Field(default=0, ge=0)
+
     # Database connections (API process). See app/core/database.py.
     DB_POOL_SIZE: int = Field(default=5, ge=1)
     DB_MAX_OVERFLOW: int = Field(default=10, ge=0)

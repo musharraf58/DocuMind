@@ -1,5 +1,4 @@
-"""DELETE /auth/me. These tests FAIL ON PURPOSE until
-app.services.users.delete_account is implemented (see its docstring)."""
+"""DELETE /auth/me (app.services.users.delete_account and purge_user)."""
 
 import uuid
 

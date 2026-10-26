@@ -93,9 +93,20 @@ async def change_password(db: AsyncSession, user: User, new_password: str) -> in
 async def delete_account(
     db: AsyncSession, storage: StorageBackend, redis: Redis, user: User, password: str
 ) -> None:
+    """DELETE /auth/me: the password confirms it, then purge_user."""
+    if not verify_password(password, user.hashed_password):
+        raise ApiError(403, "Password is incorrect", code="wrong_password")
+    await purge_user(db, storage, redis, user)
+
+
+async def purge_user(
+    db: AsyncSession, storage: StorageBackend, redis: Redis | None, user: User
+) -> int:
     """Delete the account and everything kept about it: the stored files, the
     rows (by ON DELETE CASCADE: collections, documents, chunks, conversations,
-    messages, usage events) and the user's Redis counters.
+    messages, usage events) and the user's Redis counters. The one cleanup
+    path, used by DELETE /auth/me and by retention. Returns how many stored
+    files were deleted.
 
     Order matters. Files go first, then the rows, like delete_collection: if
     something fails midway the user can simply retry (deleting a missing file
@@ -106,8 +117,6 @@ async def delete_account(
 
     A document the worker is processing right now loses its row; the job
     notices (ClaimLostError) and stops without writing anything."""
-    if not verify_password(password, user.hashed_password):
-        raise ApiError(403, "Password is incorrect", code="wrong_password")
     user_id = user.id  # read before the commit below, which ends the session's hold on `user`
     keys = (
         await db.scalars(select(Document.storage_key).where(Document.owner_id == user_id))
@@ -115,10 +124,12 @@ async def delete_account(
     await storage.delete_many(keys)
     await db.delete(user)
     await db.commit()
-    try:
-        await redis.delete(*Quotas(redis).user_keys(user_id))  # one command
-    except (RedisError, OSError):
-        logger.warning("Deleted account %s but could not clear its Redis keys", user_id)
+    if redis is not None:
+        try:
+            await redis.delete(*Quotas(redis).user_keys(user_id))  # one command
+        except (RedisError, OSError):
+            logger.warning("Deleted account %s but could not clear its Redis keys", user_id)
+    return len(keys)
 
 
 async def authenticate(db: AsyncSession, email: str, password: str) -> User | None:

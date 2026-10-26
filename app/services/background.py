@@ -26,8 +26,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings, get_settings
 from app.core.request_id import new_request_id, set_request_id
-from app.services import jobs, sweeper
+from app.services import jobs, retention, sweeper
 from app.services.inline_worker import InlineJobQueue, InlineWorker
+from app.services.storage import get_storage
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,8 @@ class InlineRuntime:
         settings: Settings,
         sessions: Sessions,
         redis: Redis | None,
-        maintenance: Callable[[Sessions, InlineJobQueue], Awaitable[None]] | None = None,
+        maintenance: Callable[[Sessions, InlineJobQueue, Redis | None], Awaitable[None]]
+        | None = None,
     ) -> None:
         self.settings = settings
         self.sessions = sessions
@@ -67,7 +69,7 @@ class InlineRuntime:
         while True:
             set_request_id(new_request_id())
             try:
-                await self._maintenance(self.sessions, self.queue)
+                await self._maintenance(self.sessions, self.queue, self.redis)
             except Exception:
                 # A database blip must not end maintenance for good.
                 logger.exception("Maintenance failed; trying again next round")
@@ -82,9 +84,12 @@ class InlineRuntime:
         logger.info("Inline ingestion stopped")
 
 
-async def run_maintenance(sessions: Sessions, queue: InlineJobQueue) -> None:
+async def run_maintenance(sessions: Sessions, queue: InlineJobQueue, redis: Redis | None) -> None:
+    """One round: the sweeper, then retention (a no-op unless RETENTION_DAYS
+    is set). Redis is touched only to delete an expired account's counters."""
     async with sessions() as db:
         await sweeper.sweep(db, queue)
+    await retention.purge_expired_accounts(sessions, get_storage(), redis)
 
 
 _runtime: InlineRuntime | None = None

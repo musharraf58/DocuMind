@@ -25,6 +25,7 @@ from app.core.request_id import VALID_ID, new_request_id, set_request_id
 # Task names. The API sends tasks by name, so it never imports worker code.
 PROCESS_DOCUMENT = "documind.process_document"
 SWEEP = "documind.sweep"
+RETENTION = "documind.retention"
 # Message header carrying the id of the request that queued the job.
 REQUEST_ID_HEADER = "request_id"
 
@@ -57,7 +58,11 @@ celery_app.conf.update(
     },
     broker_connection_retry_on_startup=True,
     # Celery beat (started with the worker via --beat) runs the sweeper.
-    beat_schedule={"sweep": {"task": SWEEP, "schedule": 60.0}},
+    # Retention does nothing unless RETENTION_DAYS is set.
+    beat_schedule={
+        "sweep": {"task": SWEEP, "schedule": 60.0},
+        "retention": {"task": RETENTION, "schedule": 3600.0},
+    },
     worker_hijack_root_logger=False,
 )
 

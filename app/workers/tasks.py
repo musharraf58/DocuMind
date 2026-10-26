@@ -16,10 +16,11 @@ from sqlalchemy.pool import NullPool
 from app.core.config import get_settings
 from app.core.database import make_engine
 from app.core.redis import make_redis
-from app.services import jobs, sweeper
+from app.services import jobs, retention, sweeper
 from app.services.embeddings import get_embedding_provider
 from app.services.queue import CeleryJobQueue
-from app.workers.celery_app import PROCESS_DOCUMENT, SWEEP, celery_app
+from app.services.storage import get_storage
+from app.workers.celery_app import PROCESS_DOCUMENT, RETENTION, SWEEP, celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -65,4 +66,19 @@ async def run_sweep() -> sweeper.SweepReport:
         async with async_sessionmaker(engine, expire_on_commit=False)() as db:
             return await sweeper.sweep(db, CeleryJobQueue())
     finally:
+        await engine.dispose()
+
+
+@celery_app.task(name=RETENTION)
+def purge_expired() -> None:
+    asyncio.run(run_retention())
+
+
+async def run_retention() -> retention.RetentionReport:
+    engine, redis = _engine(), make_redis()
+    try:
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        return await retention.purge_expired_accounts(sessions, get_storage(), redis)
+    finally:
+        await redis.aclose()
         await engine.dispose()

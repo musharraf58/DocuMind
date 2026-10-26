@@ -30,7 +30,7 @@ async def wait_until(predicate) -> None:
             await asyncio.sleep(0.02)
 
 
-async def no_maintenance(sessions, queue) -> None:
+async def no_maintenance(sessions, queue, redis) -> None:
     pass
 
 
@@ -287,7 +287,7 @@ async def test_in_process_sweeper_recovers_a_stale_processing_document(client, r
     )
     await db.commit()
 
-    await run_maintenance(runtime.sessions, runtime.queue)  # what the periodic task runs
+    await run_maintenance(runtime.sessions, runtime.queue, None)  # what the periodic task runs
     await wait_until(ready)
     assert (await status_of(db, document_id)).attempts == 2
 
@@ -295,7 +295,7 @@ async def test_in_process_sweeper_recovers_a_stale_processing_document(client, r
 async def test_maintenance_runs_periodically_and_at_start(client, test_engine, inline_settings):
     rounds = []
 
-    async def count_round(sessions, queue):
+    async def count_round(sessions, queue, redis):
         rounds.append(1)
 
     settings = inline_settings.model_copy(update={"MAINTENANCE_INTERVAL_SECONDS": 0.05})

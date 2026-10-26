@@ -13,6 +13,7 @@ from app.schemas.chunk import ChunkRead
 from app.schemas.document import DocumentRead
 from app.services import collections as collection_service
 from app.services import documents as document_service
+from app.services.capacity import check_room_for_uploads
 from app.services.queue import queue_full
 from app.services.quotas import UPLOADS
 from app.services.storage import StorageError
@@ -44,6 +45,7 @@ async def upload_document(
     collection = await collection_service.get_owned_collection(db, collection_id, user_id)
     if not queue.has_room():  # inline mode: refuse before storing anything
         raise queue_full()
+    await check_room_for_uploads(db)  # 503 once the database is near its cap
     # Storage, document count, documents in progress. Locks this user's
     # uploads until this one commits, so parallel uploads can't slip past.
     storage_left = await check_upload_caps(db, user_id)
