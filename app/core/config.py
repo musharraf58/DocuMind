@@ -4,6 +4,9 @@ from typing import Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL
+
+from app.core.db_url import to_asyncpg_url
 
 # Share of the token budget held back from document embedding so that search
 # queries can still get through while a long document is being embedded.
@@ -44,7 +47,18 @@ class Settings(BaseSettings):
         env_file=".env", extra="ignore", env_ignore_empty=True, hide_input_in_errors=True
     )
 
+    # Any Postgres URL: "postgresql+asyncpg://..." as Compose uses, or a host's
+    # libpq-style "postgresql://...?sslmode=require" (translated for asyncpg,
+    # see app/core/db_url.py).
     DATABASE_URL: str
+    # For migrations only: a direct (non-pooled) connection. Neon's pooled
+    # URL goes through PgBouncer, which migrations shouldn't use (they rely on
+    # session state that transaction pooling doesn't keep). Empty: DATABASE_URL.
+    DATABASE_URL_DIRECT: str = ""
+    # DATABASE_URL goes through PgBouncer in transaction mode (Neon's
+    # "-pooler" host): no prepared-statement caches, timeouts set per
+    # transaction. See app/core/db_url.py.
+    DB_PGBOUNCER: bool = False
     REDIS_URL: str
     SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
@@ -179,6 +193,8 @@ class Settings(BaseSettings):
     DB_POOL_SIZE: int = Field(default=5, ge=1)
     DB_MAX_OVERFLOW: int = Field(default=10, ge=0)
     DB_POOL_TIMEOUT_SECONDS: float = Field(default=10, gt=0)
+    # Replace pooled connections older than this (seconds).
+    DB_POOL_RECYCLE_SECONDS: int = Field(default=1800, ge=30)
     # Postgres cancels any single statement running longer than this. The
     # slowest measured API query (vector search, 10,000 chunks) takes ~0.1 s.
     DB_STATEMENT_TIMEOUT_MS: int = Field(default=15_000, ge=100)
@@ -279,6 +295,22 @@ class Settings(BaseSettings):
     def embedding_document_token_budget(self) -> int:
         """Largest batch of document text: the budget minus the queries' share."""
         return self.embedding_token_budget - self.embedding_query_reserve_tokens
+
+    @property
+    def database_url(self) -> URL:
+        """DATABASE_URL in the form asyncpg accepts."""
+        return to_asyncpg_url(self.DATABASE_URL)
+
+    @property
+    def migration_database_url(self) -> URL:
+        return to_asyncpg_url(self.DATABASE_URL_DIRECT or self.DATABASE_URL)
+
+    @field_validator("DATABASE_URL", "DATABASE_URL_DIRECT")
+    @classmethod
+    def check_database_url(cls, value: str) -> str:
+        if value:
+            to_asyncpg_url(value)  # fail at startup, with a message that hides the URL
+        return value
 
     @property
     def cors_origins(self) -> list[str]:
