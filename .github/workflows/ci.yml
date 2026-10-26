@@ -1,0 +1,119 @@
+# Continuous integration: every pull request, and every push to main, must
+# pass lint, the full test suite (on real Postgres + pgvector and real Redis),
+# a dependency audit and a production Docker build. See docs/CI.md.
+#
+# No secrets are stored or used here. The values in `env` below are
+# throwaway, test-only settings for disposable service containers that exist
+# for a few minutes inside the CI runner; they protect nothing.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Read-only token: CI never writes to the repository.
+permissions:
+  contents: read
+
+# A newer push to the same branch or PR cancels the run still in progress.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - name: Workflow files (actionlint, with shellcheck)
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -no-color
+
+  test:
+    name: Tests (Postgres + pgvector, Redis)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: documind
+          POSTGRES_PASSWORD: documind
+          POSTGRES_DB: documind
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U documind -d documind"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://documind:documind@localhost:5432/documind
+      REDIS_URL: redis://localhost:6379/0
+      SECRET_KEY: ci-only-throwaway-value-not-a-real-secret-0123456789
+      EMBEDDING_PROVIDER: fake
+      LLM_PROVIDER: fake
+      # Tests that need a real server fail instead of skipping (tests/test_real_redis.py).
+      REQUIRE_REAL_SERVICES: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      # The tests build their schema from the models, so run the real
+      # migrations too, then check they match the models exactly.
+      - name: Migrations apply and match the models
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+      - run: uv run pytest -q
+
+  audit:
+    name: Dependency audit (pip-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      # Exactly the locked versions, dev tools included (see docs/HARDENING.md).
+      - run: uv export --format requirements-txt --no-hashes --no-emit-project --all-groups > requirements-audit.txt
+      - run: uvx pip-audit==2.10.1 -r requirements-audit.txt --disable-pip --no-deps
+
+  docker:
+    name: Production image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: prod
+          tags: documind:ci
+          load: true
+          push: false
+          # Reuse unchanged layers (dependencies) from earlier runs.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

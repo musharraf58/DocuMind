@@ -1,0 +1,29 @@
+# Weekly pull requests for outdated dependencies. CI runs on each one, so a
+# breaking update shows up as a red check instead of a surprise.
+version: 2
+updates:
+  # Python packages (pyproject.toml + uv.lock).
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # Minor and patch updates in one PR, majors one by one.
+      python-minor:
+        update-types: [minor, patch]
+
+  # The actions used in .github/workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # The base images in the Dockerfile.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
