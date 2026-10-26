@@ -91,7 +91,8 @@ async def test_events_arrive_in_order_and_done_equals_what_is_saved(client, db, 
 
     assert result.status == 200
     assert result.headers["content-type"].startswith("text/event-stream")
-    assert result.headers["cache-control"] == "no-cache"
+    # An authenticated response: never stored (stricter than SSE's usual no-cache).
+    assert result.headers["cache-control"] == "no-store"
     assert result.headers["x-accel-buffering"] == "no"
     assert names(result) == ["meta"] + ["token"] * len(STREAMED) + ["done"]
 

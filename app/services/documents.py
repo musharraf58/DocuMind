@@ -1,7 +1,7 @@
 import codecs
 import hashlib
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import PurePosixPath
 
 from fastapi import HTTPException, UploadFile
@@ -46,9 +46,18 @@ class UploadInspector:
     """Looks at each chunk as it streams past: counts bytes, hashes, enforces the
     size limit, and checks that the content matches the claimed file type."""
 
-    def __init__(self, extension: str, max_bytes: int) -> None:
+    def __init__(
+        self,
+        extension: str,
+        max_bytes: int,
+        storage_left: int | None = None,
+        storage_full: Callable[[], HTTPException] | None = None,
+    ) -> None:
         self.extension = extension
         self.max_bytes = max_bytes
+        # The user's remaining storage (per-user cap), if it is smaller.
+        self.storage_left = storage_left
+        self.storage_full = storage_full
         self.size = 0
         self._sha256 = hashlib.sha256()
         # Incremental, because a multi-byte UTF-8 character can straddle two chunks.
@@ -69,6 +78,8 @@ class UploadInspector:
                 status_code=413,
                 detail=f"File exceeds the {self.max_bytes // (1024 * 1024)} MB limit",
             )
+        if self.storage_left is not None and self.size > self.storage_left:
+            raise self.storage_full()
         self._sha256.update(chunk)
         if self._decoder is not None:
             try:
@@ -109,9 +120,16 @@ async def _inspected_chunks(upload: UploadFile, inspector: UploadInspector) -> A
 
 
 async def upload_document(
-    db: AsyncSession, storage: StorageBackend, collection: Collection, upload: UploadFile
+    db: AsyncSession,
+    storage: StorageBackend,
+    collection: Collection,
+    upload: UploadFile,
+    storage_left: int | None = None,
+    storage_full: Callable[[], HTTPException] | None = None,
 ) -> Document:
-    """Store an upload in `collection` (caller has already verified ownership)."""
+    """Store an upload in `collection` (caller has already verified ownership).
+    storage_left: bytes the owner may still store; going over raises
+    storage_full() (and the partial file is deleted)."""
     filename = clean_filename(upload.filename)
     extension = PurePosixPath(filename).suffix.lower()
     if extension not in ALLOWED_TYPES:
@@ -123,7 +141,9 @@ async def upload_document(
     document_id = uuid.uuid4()
     # Generated, never derived from the filename.
     storage_key = f"{collection.owner_id}/{document_id}"
-    inspector = UploadInspector(extension, get_settings().MAX_UPLOAD_MB * 1024 * 1024)
+    inspector = UploadInspector(
+        extension, get_settings().MAX_UPLOAD_MB * 1024 * 1024, storage_left, storage_full
+    )
 
     await storage.save(storage_key, _inspected_chunks(upload, inspector))
 

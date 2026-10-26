@@ -16,9 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import clock
 from app.core.config import Settings, get_settings
 from app.models import Chunk, Document, DocumentStatus
+from app.services import usage
 from app.services.chunking import ChunkData, chunk_segments
 from app.services.embeddings import EmbeddingProvider, Vector
+from app.services.embeddings.errors import DailyEmbeddingQuotaError
 from app.services.extraction import ExtractionError, ExtractionLimits, extract
+from app.services.quotas import EMBED_TOKENS
 from app.services.storage import StorageBackend
 
 logger = logging.getLogger(__name__)
@@ -132,6 +135,24 @@ async def replace_chunks(
     await db.refresh(document)
 
 
+async def _check_daily_embedding_quota(needed: int) -> None:
+    """Fail before spending anything if the owner's remaining embedding
+    tokens for today can't cover this document (our estimate; the provider's
+    count is what gets added afterwards)."""
+    current = usage.current_quotas()
+    if current is None:
+        return
+    user_id, quotas = current
+    used = await quotas.used(user_id, EMBED_TOKENS)
+    limit = quotas.limit(EMBED_TOKENS)
+    if used is not None and used + needed > limit:
+        raise DailyEmbeddingQuotaError(
+            f"Daily embedding limit reached: this document needs about {needed:,} tokens "
+            f"and {max(0, limit - used):,} of {limit:,} are left today. Reprocess it after "
+            f"{quotas.resets_at():%H:%M} UTC."
+        )
+
+
 async def run_pipeline(
     db: AsyncSession,
     storage: StorageBackend,
@@ -153,6 +174,7 @@ async def run_pipeline(
         extract_and_chunk, data, document.content_type, settings
     )
     chunks = _drop_blank(chunks)
+    await _check_daily_embedding_quota(sum(chunk.token_count for chunk in chunks))
     # Network calls, rate-limit waits and retries: possibly many minutes.
     # No database transaction is open meanwhile (the claim was committed and
     # each heartbeat commits at once), so no locks or connection are held.

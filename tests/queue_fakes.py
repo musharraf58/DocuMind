@@ -6,12 +6,14 @@ import uuid
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.api.deps import embedding_provider
+from app.core.redis import get_redis
 from app.main import app
 from app.models import Document, DocumentStatus
 from app.services.embeddings import EmbeddingProvider
 from app.services.jobs import JobResult, run_job
 from app.services.queue import JobQueue
 from app.services.storage import get_storage
+from app.services.usage import UsageRecorder
 
 
 class RecordingQueue(JobQueue):
@@ -43,9 +45,15 @@ class RecordingQueue(JobQueue):
         provider = (
             embedder or app.dependency_overrides.get(embedding_provider, embedding_provider)()
         )
+        # Like the worker: usage is recorded for the document's owner, into the
+        # test database and the test's fake Redis.
+        redis = app.dependency_overrides.get(get_redis, lambda: None)()
+        recorder = UsageRecorder(self._sessions, redis)
         results = []
         while self.enqueued:
             document_id, _ = self.enqueued.pop(0)
             async with self._sessions() as session:
-                results.append(await run_job(session, document_id, get_storage(), provider))
+                results.append(
+                    await run_job(session, document_id, get_storage(), provider, recorder=recorder)
+                )
         return results

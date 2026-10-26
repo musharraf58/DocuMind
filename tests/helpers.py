@@ -69,3 +69,9 @@ async def run_queued_jobs():
     from app.services.queue import get_queue
 
     return await app.dependency_overrides[get_queue]().run_all()
+
+
+def error_body(response) -> dict:
+    """An error response without its request id (different on every request),
+    so two error responses can be compared."""
+    return {k: v for k, v in response.json().items() if k != "request_id"}

@@ -12,7 +12,7 @@ from app.services import retrieval as search_service
 from app.services.embeddings import EmbeddingBusyError, EmbeddingError
 from app.services.retrieval import build_search_query
 from tests.embedding_fakes import FakeClock, KeywordProvider, limited_provider
-from tests.helpers import auth_headers, create_collection, run_queued_jobs, upload
+from tests.helpers import auth_headers, create_collection, error_body, run_queued_jobs, upload
 
 KEYWORDS = ["cats", "databases", "cooking", "rockets"]
 HNSW_INDEX = "ix_chunks_embedding_hnsw"
@@ -125,7 +125,7 @@ async def test_other_users_collection_is_404(client, keywords):
     response = await search(client, alice, bob_collection, "cats")
     missing = await search(client, alice, str(uuid.uuid4()), "cats")
     assert response.status_code == missing.status_code == 404
-    assert response.json() == missing.json()
+    assert error_body(response) == error_body(missing)
 
 
 async def test_only_the_requested_collection_is_searched(client, keywords):
@@ -174,7 +174,7 @@ async def test_embedding_outage_is_503_with_safe_message(client, keywords, monke
     monkeypatch.setattr(keywords, "embed_query", down)
     response = await search(client, headers, collection_id, "cats")
     assert response.status_code == 503
-    assert response.json() == {"detail": "Embedding service is unavailable; try again later"}
+    assert response.json()["detail"] == "Embedding service is unavailable; try again later"
 
 
 async def test_filtered_search_finds_owner_chunks_beyond_nearest_candidates(
@@ -230,7 +230,7 @@ async def test_busy_embedding_service_is_429_with_retry_after_header(client, key
     response = await search(client, headers, collection_id, "cats")
     assert response.status_code == 429
     assert response.headers["Retry-After"] == "34"  # rounded up, never earlier than allowed
-    assert response.json() == {"detail": "Embedding service is busy; retry in about 34 seconds"}
+    assert response.json()["detail"] == "Embedding service is busy; retry in about 34 seconds"
 
 
 async def test_real_limiter_makes_search_fail_fast_instead_of_hanging(client):

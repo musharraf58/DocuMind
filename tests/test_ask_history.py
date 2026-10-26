@@ -192,9 +192,8 @@ async def test_second_answer_while_one_is_in_progress_is_409(client, db, embedde
 
     response = await ask(client, headers, collection_id, "Third?", first["conversation_id"])
     assert response.status_code == 409
-    assert response.json() == {
-        "detail": "An answer is already being generated in this conversation"
-    }
+    assert response.json()["detail"] == "An answer is already being generated in this conversation"
+    assert response.json()["code"] == "conflict"
     assert embedder.embedded_queries == ["What do cats do?"]  # nothing done for the refused one
 
     await conversation_service.finish_turn(db, in_flight, MessageStatus.complete, "done")

@@ -16,6 +16,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from app.models import UsageKind
 from app.services.conversations import HistoryTurn
 from app.services.llm import LLMProvider
 from app.services.prompts import defuse, render_history, select_history
@@ -60,7 +61,9 @@ async def rewrite_question(
     user = render_history(turns) + "\n\n<question>\n" + defuse(question) + "\n</question>"
     try:
         async with asyncio.timeout(max_seconds):
-            result = await llm.generate(REWRITE_SYSTEM, user, REWRITE_MAX_TOKENS)
+            result = await llm.generate(
+                REWRITE_SYSTEM, user, REWRITE_MAX_TOKENS, usage_kind=UsageKind.llm_rewrite
+            )
     except TimeoutError:
         return Rewrite(question, False, "timed out")
     except Exception as exc:  # LLM error, busy, rate limiter down...: carry on without it

@@ -2,15 +2,16 @@ import uuid
 
 from fastapi import APIRouter
 
-from app.api.deps import CurrentUser, DbSession, EmbedderDep
+from app.api.deps import CurrentUser, DbSession, EmbedderDep, QuotasDep, RecorderDep
 from app.api.errors import provider_error
+from app.api.limits import limit_default
 from app.core.config import get_settings
 from app.schemas.search import SearchRequest, SearchResult
 from app.services import collections as collection_service
 from app.services import retrieval
 from app.services.embeddings import EmbeddingError
 
-router = APIRouter(tags=["search"])
+router = APIRouter(tags=["search"], dependencies=[limit_default])
 
 
 # A debugging view: the chunks retrieval finds for a query, with their
@@ -23,14 +24,19 @@ async def search_collection(
     db: DbSession,
     user: CurrentUser,
     embedder: EmbedderDep,
+    recorder: RecorderDep,
+    quotas: QuotasDep,
 ):
     # Ownership first: 404 for other users' collections, and we never pay to
     # embed a query for a collection the caller can't see.
     collection = await collection_service.get_owned_collection(db, collection_id, user.id)
     owner_id, collection_id = collection.owner_id, collection.id
     await db.commit()  # no transaction held during the embedding call
+    # Search keeps working when the LLM budget is gone; only embedding counts.
+    await quotas.check_embed_tokens(owner_id)
     try:
-        vector = await embedder.embed_query(body.query)
+        with recorder.scope(owner_id):
+            vector = await embedder.embed_query(body.query)
     except EmbeddingError as exc:
         raise provider_error(exc) from exc
     options = retrieval.SearchOptions.from_settings(get_settings(), top_k=body.limit)

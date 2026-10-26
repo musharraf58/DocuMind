@@ -13,6 +13,7 @@ from sqlalchemy.pool import NullPool
 from app.api.deps import get_session_factory
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.rate_limit import memory_fallback
 from app.core.redis import get_redis
 from app.main import app
 from app.models import Base
@@ -119,6 +120,26 @@ def fake_embeddings(monkeypatch) -> None:
     monkeypatch.setattr(get_settings(), "LLM_PROVIDER", "fake")
 
 
+GENEROUS = "100000/minute"
+
+
+@pytest.fixture(autouse=True)
+def generous_limits(monkeypatch) -> None:
+    """Limits stay switched on (so their code runs in every test) but high
+    enough never to get in the way. Tests of a limit lower it themselves."""
+    settings = get_settings()
+    for name in type(settings).model_fields:
+        if name.startswith("RATE_LIMIT_") and name != "RATE_LIMIT_ENABLED":
+            monkeypatch.setattr(settings, name, GENEROUS)
+    memory_fallback.clear()  # in-process state must not leak between tests
+
+
+@pytest.fixture(autouse=True)
+def open_registration(monkeypatch) -> None:
+    """Most tests just need accounts; tests of the modes set their own."""
+    monkeypatch.setattr(get_settings(), "REGISTRATION_MODE", "open")
+
+
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch) -> None:
     """Fail loudly if anything tries a real HTTP request. (The test client
@@ -128,3 +149,20 @@ def no_network(monkeypatch) -> None:
         raise RuntimeError(f"Tests must not make network calls (tried {request.url.host})")
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", refuse)
+
+
+@pytest.fixture(autouse=True)
+def generous_quotas(monkeypatch) -> None:
+    """Daily quotas and upload caps high enough never to get in the way;
+    their tests lower them."""
+    settings = get_settings()
+    for name in [
+        "DAILY_QUESTIONS_PER_USER",
+        "DAILY_EMBED_TOKENS_PER_USER",
+        "DAILY_UPLOADS_PER_USER",
+        "GLOBAL_DAILY_LLM_BUDGET",
+        "MAX_STORAGE_MB_PER_USER",
+        "MAX_DOCUMENTS_PER_USER",
+        "MAX_PENDING_DOCUMENTS_PER_USER",
+    ]:
+        monkeypatch.setattr(settings, name, 10**9)

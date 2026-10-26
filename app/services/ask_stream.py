@@ -12,12 +12,13 @@ from collections.abc import AsyncIterator
 from app.api.errors import provider_error
 from app.core.config import get_settings
 from app.models import MessageStatus
-from app.services import answering
+from app.services import answering, usage
 from app.services.answering import DECLINED_ANSWER, NOT_FOUND_ANSWER, Sessions
 from app.services.conversations import Turn
 from app.services.embeddings import EmbeddingError, EmbeddingProvider
 from app.services.llm import LLMError, LLMProvider, LLMRefusalError, LLMUsage
 from app.services.sse import event
+from app.services.usage import UsageRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +31,25 @@ async def stream_answer(
     llm: LLMProvider,
     turn: Turn,
     question: str,
+    recorder: UsageRecorder | None = None,
 ) -> AsyncIterator[str]:
     """Runs after begin() (the question is saved, the answer is in progress).
     No database session is open here except the short ones inside
     find_sources() and finish()."""
+    # Inside the generator: the stream runs after the endpoint has returned,
+    # so a scope opened in the endpoint would already be closed.
+    with usage.scoped(recorder, turn.owner_id, conversation_id=turn.conversation_id):
+        async for chunk in _stream_answer(sessions, embedder, llm, turn, question):
+            yield chunk
+
+
+async def _stream_answer(
+    sessions: Sessions,
+    embedder: EmbeddingProvider,
+    llm: LLMProvider,
+    turn: Turn,
+    question: str,
+) -> AsyncIterator[str]:
     settings = get_settings()
     yield event(
         "meta",

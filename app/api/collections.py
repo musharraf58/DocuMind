@@ -4,10 +4,11 @@ from typing import Annotated
 from fastapi import APIRouter, Query, Response, status
 
 from app.api.deps import CurrentUser, DbSession, StorageDep
+from app.api.limits import limit_default
 from app.schemas.collection import CollectionCreate, CollectionRead, CollectionUpdate
 from app.services import collections as collection_service
 
-router = APIRouter(prefix="/collections", tags=["collections"])
+router = APIRouter(prefix="/collections", tags=["collections"], dependencies=[limit_default])
 
 
 @router.post("", response_model=CollectionRead, status_code=status.HTTP_201_CREATED)

@@ -7,6 +7,7 @@ from app.core.config import get_settings
 from tests.helpers import (
     auth_headers,
     create_collection,
+    error_body,
     files_on_disk,
     make_docx,
     make_pdf,
@@ -497,7 +498,7 @@ async def test_foreign_and_nonexistent_documents_look_identical(client, alice, b
     missing = await client.get(f"/documents/{uuid.uuid4()}", headers=bob)
 
     assert foreign.status_code == missing.status_code == 404
-    assert foreign.json() == missing.json()
+    assert error_body(foreign) == error_body(missing)
 
 
 # ---------- deleting a collection also deletes its files ----------

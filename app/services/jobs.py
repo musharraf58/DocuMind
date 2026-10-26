@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import clock
 from app.core.config import Settings, get_settings
 from app.models import Document, DocumentStatus
+from app.services import usage
 from app.services.embeddings import (
     EmbeddingBusyError,
     EmbeddingError,
@@ -36,6 +37,7 @@ from app.services.embeddings import (
 from app.services.extraction import ExtractionError
 from app.services.processing import ClaimLostError, ours, run_pipeline
 from app.services.storage import StorageBackend
+from app.services.usage import UsageRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -125,10 +127,12 @@ async def run_job(
     storage: StorageBackend,
     embedder: EmbeddingProvider,
     settings: Settings | None = None,
+    recorder: UsageRecorder | None = None,
 ) -> JobResult:
     """Process one document from the queue. Never raises for problems with
     the document itself: the outcome says what happened and, for a retry,
-    when to enqueue it again."""
+    when to enqueue it again. Embedding usage is recorded for the document's
+    owner through `recorder` (none: nothing recorded, e.g. the eval runner)."""
     settings = settings or get_settings()
     claimed = await claim(db, document_id)
     if claimed is None:
@@ -142,7 +146,8 @@ async def run_job(
 
     try:
         async with asyncio.timeout(settings.JOB_TIMEOUT_MINUTES * 60):
-            await run_pipeline(db, storage, embedder, document, run_id, settings)
+            with usage.scoped(recorder, document.owner_id, document_id=document.id):
+                await run_pipeline(db, storage, embedder, document, run_id, settings)
     except ClaimLostError:
         await db.rollback()
         logger.warning(
