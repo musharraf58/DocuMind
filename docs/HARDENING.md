@@ -197,3 +197,58 @@ cost commands. Keep the budget in mind instead:
 - If the budget runs out, Upstash refuses commands: rate limits and quotas
   then **fail open** (logged loudly), and the LLM rate limiter refuses, so
   answers stop with 503 until the month resets. Nothing is lost.
+
+
+## 5. Memory in 512 MB (Render free)
+
+Render's free web service has 512 MB, and in lite mode the API process also
+runs the document jobs. Measured on 2026-10-27 with the production image
+under the same limit: `docker run --memory=512m --memory-swap=512m`, lite
+mode (`INGESTION_MODE=inline`, `STORAGE_BACKEND=s3` against a local S3
+server, Postgres, Redis), fake embedding and LLM providers (the providers'
+own memory use is tiny; what matters is our process). A sampler read the
+container's cgroup memory and the app process's RSS every 0.1 s.
+
+Test files (generated for the measurement, not committed): a real-world
+14-page academic paper with embedded fonts (1.0 MB), a 222-page
+LibreOffice-made book (0.4 MB), a 40-page PDF with one incompressible image
+per page close to the upload limit (19.3 MB), and a 480-page dense text PDF
+at the page limit (2.1 MB, 1.74 million characters, about 447,000 tokens,
+fully embedded).
+
+| Phase | Peak RSS | Peak RSS with `MALLOC_ARENA_MAX=2` |
+| --- | ---: | ---: |
+| idle after startup | 124 MB | 124 MB |
+| upload + process the 14-page paper | 177 MB | 173 MB |
+| upload + process the 222-page book | 183 MB | 180 MB |
+| upload + process the 19.3 MB image PDF | 234 MB | 229 MB |
+| 5 concurrent ask / ask-stream, 3 rounds | 198 MB | 193 MB |
+| 5 concurrent downloads of the 19.3 MB file | 225 MB | 204 MB |
+| upload + process the 480-page document | 287 MB | **253 MB** |
+| steady state after all jobs | 282 MB | 250 MB |
+| **all at once**: the 480-page job + 5 questions + 5 downloads, 4 rounds | – | **262 MB** |
+
+No run was OOM-killed. The worst case uses about half of the 512 MB.
+
+Why it fits without further changes:
+
+- Jobs run **one at a time** (inline mode), so two large documents never
+  sit in memory together.
+- Uploads and downloads **stream** in 1 MB chunks (S3: 8 MB multipart
+  parts): five concurrent downloads of the 19.3 MB file peaked lower than
+  processing that same file once.
+- The limits already bound a single document: `MAX_UPLOAD_MB=20`,
+  `MAX_EXTRACT_PAGES=500`, `MAX_EXTRACTED_CHARS=2,000,000`, and the daily
+  embedding quota (200,000 tokens) refuses the largest documents before
+  their vectors are built.
+
+The one change made: `MALLOC_ARENA_MAX=2` in the production image (-34 MB
+at the peak, -32 MB in steady state). Python keeps freed memory for reuse
+rather than returning it to the system, which is why steady state stays near
+the peak; it doesn't grow with more documents, since the same memory is
+reused.
+
+If a future change pushes memory up, the cheap levers, in order: lower
+`MAX_EXTRACT_PAGES` / `MAX_EXTRACTED_CHARS`; spool the stored file to a
+temporary file instead of reading it whole (the job holds the upload, at
+most 20 MB, while extracting); lower `EMBEDDING_BATCH_SIZE`.

@@ -47,10 +47,15 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-pro
 # Last stage = the default target, so a plain `docker build .` makes this image.
 FROM python:3.12-slim AS prod
 
+# MALLOC_ARENA_MAX=2: glibc gives each thread its own memory arena, and the
+# app runs extraction and file I/O in worker threads. Capping the arenas
+# lowered peak memory from 287 to 253 MB in the 512 MB measurements
+# (docs/HARDENING.md, "Memory").
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH" \
-    TIKTOKEN_CACHE_DIR=/app/.tiktoken_cache
+    TIKTOKEN_CACHE_DIR=/app/.tiktoken_cache \
+    MALLOC_ARENA_MAX=2
 
 # A system user with no login shell and no home: if the app is ever
 # compromised, the attacker is not root inside the container.
