@@ -106,8 +106,6 @@ async def delete_me(
 ):
     """Delete your account and everything stored for it: collections,
     documents (rows AND files), conversations, usage history and rate-limit
-    counters. Requires your password. Cannot be undone.
-
-    Not implemented yet: see app.services.users.delete_account."""
+    counters. Requires your password. Cannot be undone."""
     await user_service.delete_account(db, storage, redis, user, body.password)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -1,19 +1,24 @@
 import hashlib
 import hmac
+import logging
 
 from fastapi import HTTPException, status
 from pydantic import SecretStr
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import redis_keys
 from app.core.config import Settings, get_settings
 from app.core.errors import ApiError
 from app.core.passwords import password_problem
 from app.core.security import DUMMY_HASH, hash_password, verify_password
-from app.models import User
+from app.models import Document, User
 from app.services.storage import StorageBackend
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_email(email: str) -> str:
@@ -88,29 +93,35 @@ async def change_password(db: AsyncSession, user: User, new_password: str) -> in
 async def delete_account(
     db: AsyncSession, storage: StorageBackend, redis: Redis, user: User, password: str
 ) -> None:
-    """Delete the account and EVERYTHING kept about it. Left for you to implement.
+    """Delete the account and everything kept about it: the stored files, the
+    rows (by ON DELETE CASCADE: collections, documents, chunks, conversations,
+    messages, usage events) and the user's Redis counters.
 
-    Must:
-    1. Require the password: if verify_password(password, user.hashed_password)
-       is false, raise ApiError(403, "Password is incorrect",
-       code="wrong_password") and change nothing.
-    2. Delete the stored files of all the user's documents (storage.delete for
-       each Document.storage_key where Document.owner_id == user.id). The
-       database cascade removes rows, not files. Files first, then rows, like
-       delete_collection: a failure midway can then be retried.
-    3. Delete the user's row. ON DELETE CASCADE removes collections, documents,
-       chunks, conversations, messages and usage events.
-    4. Delete the user's Redis keys: for each pattern in
-       redis_keys.user_key_patterns(user.id), SCAN (redis.scan_iter(match=...))
-       and DELETE what matches. (Failed-login counters are keyed by a hash of
-       email + IP, can't be found by user id, and expire on their own.)
+    Order matters. Files go first, then the rows, like delete_collection: if
+    something fails midway the user can simply retry (deleting a missing file
+    is fine), whereas rows first would leave files nobody could ever find.
+    Redis goes last: the counters expire within two days anyway, so a Redis
+    outage after the rows are gone is only logged, never an error for a user
+    whose account no longer exists.
 
-    Things to decide: what if Redis is down at step 4 (the rows are already
-    gone)? The counters expire within two days anyway. And what about
-    documents being processed by the worker right now (the job notices the
-    row is gone: ClaimLostError)?
-    """
-    raise NotImplementedError("DELETE /auth/me is not implemented yet")
+    A document the worker is processing right now loses its row; the job
+    notices (ClaimLostError) and stops without writing anything."""
+    if not verify_password(password, user.hashed_password):
+        raise ApiError(403, "Password is incorrect", code="wrong_password")
+    user_id = user.id  # read before the commit below, which ends the session's hold on `user`
+    keys = (
+        await db.scalars(select(Document.storage_key).where(Document.owner_id == user_id))
+    ).all()
+    for key in keys:
+        await storage.delete(key)
+    await db.delete(user)
+    await db.commit()
+    try:
+        for pattern in redis_keys.user_key_patterns(user_id):
+            async for key in redis.scan_iter(match=pattern):
+                await redis.delete(key)
+    except (RedisError, OSError):
+        logger.warning("Deleted account %s but could not clear its Redis keys", user_id)
 
 
 async def authenticate(db: AsyncSession, email: str, password: str) -> User | None:

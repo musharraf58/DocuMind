@@ -738,10 +738,10 @@ For local development, set `REGISTRATION_MODE=open` in `.env`.
 - **How**: each user has a `token_version`. It is copied into every token and checked on
   every request. A password change bumps it, so older tokens no longer match. Tokens
   issued before this phase have no version and are refused: log in again once.
-- **`DELETE /auth/me`** (with the password) will delete the account with its rows, stored
-  files and Redis counters. It is **not implemented yet**: see
-  `app/services/users.py::delete_account`, and `tests/test_delete_account.py`, which fails
-  until then.
+- **`DELETE /auth/me`** (with the password) deletes the account and everything stored for
+  it: the rows (by cascade), the stored files and the Redis counters. Files go first, so a
+  failure midway can be retried; the Redis cleanup is best-effort (counters expire within
+  two days anyway).
 
 ### Daily quotas
 
@@ -866,9 +866,6 @@ uv run alembic revision --autogenerate -m "message" # new migration from model c
 Tests use a separate database, `documind_test`, created automatically on the same
 Postgres server (so Postgres must be running). They never call Voyage, Gemini or a real
 Redis (fakes throughout).
-
-`tests/test_delete_account.py` fails on purpose until `DELETE /auth/me` is implemented
-(`app/services/users.py::delete_account`).
 
 ```bash
 docker compose up -d postgres
