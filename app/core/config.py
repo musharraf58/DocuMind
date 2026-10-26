@@ -285,6 +285,10 @@ class Settings(BaseSettings):
     # Gemini's free tier allowed about 500 a day when measured; this leaves room.
     GLOBAL_DAILY_LLM_BUDGET: int = Field(default=350, ge=0)
     QUOTA_RESET_HOUR_UTC: int = Field(default=0, ge=0, le=23)
+    # The shared read-only demo account, for `python -m scripts.seed_demo`
+    # only (the app itself never reads these). Never commit real values.
+    DEMO_EMAIL: str = ""
+    DEMO_PASSWORD: SecretStr = SecretStr("")
     # Interactive API docs (/docs, /redoc, /openapi.json).
     DOCS_ENABLED: bool = True
     # In production, docs stay refused unless this explicit opt-in is set too.

@@ -5,6 +5,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 
+from app.api.demo import not_demo
 from app.api.deps import CurrentUser, DbSession, QueueDep, QuotasDep, StorageDep
 from app.api.limits import limit_default, limit_upload
 from app.core.config import get_settings
@@ -26,7 +27,7 @@ router = APIRouter(tags=["documents"])
     "/collections/{collection_id}/documents",
     response_model=DocumentRead,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[limit_upload],
+    dependencies=[not_demo, limit_upload],
 )
 async def upload_document(
     collection_id: uuid.UUID,
@@ -129,7 +130,7 @@ async def download_document(
 @router.delete(
     "/documents/{document_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[limit_default],
+    dependencies=[not_demo, limit_default],
 )
 async def delete_document(
     document_id: uuid.UUID, db: DbSession, user: CurrentUser, storage: StorageDep
@@ -143,7 +144,7 @@ async def delete_document(
     "/documents/{document_id}/reprocess",
     response_model=DocumentRead,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[limit_default],
+    dependencies=[not_demo, limit_default],
 )
 async def reprocess_document(
     document_id: uuid.UUID, db: DbSession, user: CurrentUser, queue: QueueDep

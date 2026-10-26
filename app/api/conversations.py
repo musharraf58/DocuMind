@@ -3,6 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, Response, status
 
+from app.api.demo import not_demo
 from app.api.deps import CurrentUser, DbSession
 from app.api.limits import limit_default
 from app.schemas.conversation import (
@@ -45,7 +46,11 @@ async def get_conversation(
     )
 
 
-@router.patch("/conversations/{conversation_id}", response_model=ConversationRead)
+@router.patch(
+    "/conversations/{conversation_id}",
+    response_model=ConversationRead,
+    dependencies=[not_demo],
+)
 async def rename_conversation(
     conversation_id: uuid.UUID, body: ConversationRename, db: DbSession, user: CurrentUser
 ):
@@ -53,7 +58,11 @@ async def rename_conversation(
     return await conversation_service.rename(db, conversation, body.title)
 
 
-@router.delete("/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/conversations/{conversation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[not_demo],
+)
 async def delete_conversation(conversation_id: uuid.UUID, db: DbSession, user: CurrentUser):
     conversation = await conversation_service.get_owned_conversation(db, conversation_id, user.id)
     await conversation_service.delete(db, conversation)

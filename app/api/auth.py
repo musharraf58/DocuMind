@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from redis.asyncio import Redis
 
+from app.api.demo import not_demo
 from app.api.deps import CurrentUser, DbSession, StorageDep
 from app.api.limits import (
     Limiter,
@@ -78,7 +79,7 @@ async def me(current_user: CurrentUser):
     return current_user
 
 
-@router.post("/change-password", response_model=Token, dependencies=[limit_account])
+@router.post("/change-password", response_model=Token, dependencies=[not_demo, limit_account])
 async def change_password(
     body: ChangePassword, request: Request, user: CurrentUser, db: DbSession, guard: Guard
 ):
@@ -96,7 +97,9 @@ async def change_password(
     return Token(access_token=create_access_token(user.id, version))
 
 
-@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT, dependencies=[limit_account])
+@router.delete(
+    "/me", status_code=status.HTTP_204_NO_CONTENT, dependencies=[not_demo, limit_account]
+)
 async def delete_me(
     body: DeleteAccount,
     user: CurrentUser,

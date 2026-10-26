@@ -53,3 +53,5 @@ class UserRead(BaseModel):
     id: uuid.UUID
     email: EmailStr
     created_at: datetime
+    # The shared read-only demo account (a client can show a banner).
+    is_demo: bool = False
