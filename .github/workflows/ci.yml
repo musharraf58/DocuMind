@@ -117,3 +117,7 @@ jobs:
           # Reuse unchanged layers (dependencies) from earlier runs.
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Runs as a non-root user, without build tools
+        run: |
+          test "$(docker run --rm --entrypoint id documind:ci -u)" != "0"
+          ! docker run --rm --entrypoint sh documind:ci -c 'command -v uv'
