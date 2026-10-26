@@ -13,8 +13,10 @@ from app.core.errors import CatchAllMiddleware, install_error_handlers
 from app.core.headers import SecurityHeadersMiddleware
 from app.core.limits import MaxBodySizeMiddleware
 from app.core.logging import configure_logging
+from app.core.redis import get_redis
 from app.core.request_id import HEADER as REQUEST_ID_HEADER
 from app.core.request_id import RequestIdMiddleware
+from app.services import background
 from app.services.integrity import report_missing_embeddings
 from app.services.storage import StorageError
 
@@ -37,7 +39,10 @@ EXPOSED_HEADERS = [
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await report_missing_embeddings(SessionLocal)
-    yield
+    # Inline mode: the document worker and periodic maintenance run in this
+    # process, from now until shutdown (app/services/background.py).
+    async with background.running(get_settings(), get_redis()):
+        yield
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

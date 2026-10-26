@@ -7,9 +7,11 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.redis import get_redis
 from app.core.redis_keys import WORKER_HEARTBEAT
+from app.services import background
 
 router = APIRouter(tags=["health"])
 
@@ -25,8 +27,12 @@ async def _check(probe) -> str:
 
 
 async def _worker(redis: Redis) -> str:
-    """ "ok" if a worker wrote its heartbeat recently (the key expires after
-    90 s without one, see app/workers/heartbeat.py)."""
+    """Celery mode: "ok" if a worker wrote its heartbeat recently (the key
+    expires after 90 s without one, see app/workers/heartbeat.py). Inline
+    mode: "ok" if this process's own worker task is running; no Redis."""
+    if get_settings().INGESTION_MODE == "inline":
+        runtime = background.current()
+        return "ok" if runtime is not None and runtime.worker.alive else "unavailable"
     try:
         alive = await asyncio.wait_for(redis.exists(WORKER_HEARTBEAT), CHECK_TIMEOUT_SECONDS)
     except Exception:
@@ -73,7 +79,8 @@ async def ready(
     redis: Annotated[Redis, Depends(get_redis)],
 ) -> JSONResponse:
     """Ready to serve: Postgres and Redis answer, and a worker is alive
-    (otherwise uploads would never be processed). 503 with the failing part
+    (otherwise uploads would never be processed): the Celery worker's
+    heartbeat, or in inline mode this process's worker task. 503 with the failing part
     named otherwise; a load balancer stops sending traffic until it's 200."""
     return _report(
         {

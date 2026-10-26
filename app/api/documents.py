@@ -13,6 +13,7 @@ from app.schemas.chunk import ChunkRead
 from app.schemas.document import DocumentRead
 from app.services import collections as collection_service
 from app.services import documents as document_service
+from app.services.queue import queue_full
 from app.services.quotas import UPLOADS
 from app.services.storage import StorageError
 from app.services.upload_caps import MB, check_upload_caps, storage_full
@@ -41,6 +42,8 @@ async def upload_document(
     # (reading user.id after that would try to reload it from the database).
     user_id = user.id
     collection = await collection_service.get_owned_collection(db, collection_id, user_id)
+    if not queue.has_room():  # inline mode: refuse before storing anything
+        raise queue_full()
     # Storage, document count, documents in progress. Locks this user's
     # uploads until this one commits, so parallel uploads can't slip past.
     storage_left = await check_upload_caps(db, user_id)
@@ -146,6 +149,8 @@ async def reprocess_document(
     """Queue the document to be processed again (e.g. after a failure or a
     model change). 409 if it is already queued or being processed."""
     document = await document_service.get_owned_document(db, document_id, user.id)
+    if not queue.has_room():
+        raise queue_full()
     if not await document_service.queue_for_processing(db, document):
         raise HTTPException(status_code=409, detail="Document is already queued or being processed")
     await queue.enqueue(document.id)

@@ -187,7 +187,20 @@ class Settings(BaseSettings):
     # proxies and browsers don't close an idle-looking connection.
     STREAM_HEARTBEAT_SECONDS: float = Field(default=15, gt=0)
 
-    # Background jobs (Celery worker).
+    # Where document jobs run. "celery": a separate Celery worker process
+    # (Docker Compose). "inline": inside the API process, one at a time, from
+    # a bounded in-memory queue; for hosts without a free background worker
+    # (Render's free tier). See app/services/inline_worker.py.
+    INGESTION_MODE: Literal["celery", "inline"] = "celery"
+    # Inline mode: documents waiting at most; uploads beyond it get 503.
+    INLINE_QUEUE_CAPACITY: int = Field(default=20, ge=1, le=1000)
+    # Inline mode: on shutdown, let the running job finish for this long, then
+    # stop it and put its document back to "pending".
+    INLINE_SHUTDOWN_GRACE_SECONDS: float = Field(default=15, ge=0)
+    # Inline mode: the sweeper (and retention) run this often, in-process.
+    MAINTENANCE_INTERVAL_SECONDS: float = Field(default=120, ge=10)
+
+    # Background jobs (both modes).
     # Tries per document for transient failures (rate limits, timeouts, 5xx).
     MAX_JOB_ATTEMPTS: int = Field(default=4, ge=1)
     # Wait before retrying a transient failure: BASE, then 2x, then 4x ...
