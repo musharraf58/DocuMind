@@ -1,4 +1,4 @@
-# Hardening: database review and dependency audit
+# Hardening: database, dependencies, Redis budget, memory
 
 Measured 2026-10-22 for Phase 9. The limits, quotas and HTTP hardening are
 described in the README ("Security and Limits"); this file records the
@@ -121,5 +121,79 @@ After the upgrades: **no known vulnerabilities found.** Rebuild the Docker
 image (`docker compose build`) to pick up the new versions.
 
 pip-audit sends package names and versions (nothing else) to the PyPI
-advisory database. Run it again before each deploy; a CI job could do it
-automatically.
+advisory database. CI now runs it on every pull request (docs/CI.md).
+
+## 4. Redis command budget
+
+Upstash's free Redis allows **500,000 commands a month** (checked on
+[upstash.com/pricing/redis](https://upstash.com/pricing/redis), October 2026), about
+**16,400 a day**. Unlike a server you run yourself, idle chatter costs the
+same as real work, so every command per request was counted.
+
+### How it was measured
+
+`tests/test_redis_budget.py` sends each kind of request through the app
+with the **real** Voyage and Gemini clients (their real Redis rate limiters
+and the real global LLM budget) against simulated HTTP servers, and a fake
+Redis that records every command. The test asserts the exact list, so a
+change that adds Redis traffic to a request fails CI until this table is
+updated. Counts are steady state: the first use of a Lua script on a fresh
+Redis also sends a refused `EVALSHA` and a `SCRIPT LOAD`, once per server.
+
+### Commands per request
+
+| Request | Before | Now | Commands (now) |
+| --- | ---: | ---: | --- |
+| `GET /health/live` (Render's health check) | 0 | **0** | none |
+| `GET /health/ready` | 2 | 2 (Celery) / **1** (inline) | `PING`; `EXISTS` on the worker heartbeat in Celery mode only |
+| `POST /auth/register` | 1 | 1 | rate limit |
+| `POST /auth/login` | 4 | **3** | rate limit per IP, per email; failed-login record (`HMGET`). The `DEL` that cleared it now runs only when there was a record |
+| any other authenticated request | 1 | 1 | rate limit |
+| `GET /usage` | 4 | **2** | rate limit; the three daily counters in one `MGET` |
+| `POST .../documents` (upload) | 3 | 3 | rate limit; embedding tokens left (`GET`); daily upload quota |
+| document job | 1 + 3 per batch | 1 + 2–3 per batch | `GET` quota; per embedding batch: rate-limit window, token correction (only if the provider counted more than we estimated), daily token counter |
+| `POST .../search` | 5 | 5 | rate limit; tokens left; embedding rate limit + correction; daily token counter |
+| `POST .../ask` and `.../ask/stream` | 9 | **7** | rate limit; **admission** (global answer capacity + tokens left + take a question: one script, was three commands); embedding rate limit + correction + token counter; global LLM budget; LLM rate limit. A follow-up question adds 2 (the rewrite's LLM budget and rate limit) |
+| idle app, **inline mode** | – | **0** | the worker waits on an in-memory queue; maintenance uses Postgres only (`tests/test_inline_mode.py` asserts zero) |
+| idle app, **Celery mode** | 131 per minute | (unchanged) | measured with `INFO commandstats`: the worker's `BRPOP` once a second, `PUBLISH`, `PING`, beat, the heartbeat |
+| `DELETE /auth/me`, retention | `SCAN` per pattern | **1** | one `DEL` of the user's known key names (no `SCAN`, whose cost grows with the whole keyspace) |
+
+Fixes made: the question admission script, the `MGET`, skipping a token
+correction that can't change anything (the limiter never lowers a count),
+skipping the login `DEL` when there is nothing to clear, and deleting a
+user's keys by name.
+
+### What the free tier carries
+
+At 16,400 commands a day:
+
+- **Questions:** 7 each, so about 2,300 a day, but the global LLM budget
+  (`GLOBAL_DAILY_LLM_BUDGET=350`) stops answers long before: 350 questions
+  use about 2,450 commands, 15% of the day.
+- **A typical visit** (log in, ~20 page requests, 5 questions, 2 searches):
+  3 + 20 + 35 + 10 = **68 commands**, so roughly **240 visits a day**.
+- **Ingestion:** a 300-page book (about 200,000 tokens, ~45 embedding
+  batches) costs about 135 commands.
+- **Idle:** 0 in inline mode. A Celery worker on Upstash would spend about
+  188,000 commands a day doing nothing, the whole month's allowance in under
+  3 days. This alone rules out Celery-on-Upstash for the free tier.
+
+**If Upstash bills each command inside a Lua script** (its docs don't say;
+`EVALSHA` might count as 1 or as every `redis.call` it makes), the worst
+case is about 5x: a question would cost about 40, and the free tier would
+carry about 400 questions a day, still above the 350 the LLM budget allows.
+Watch the Upstash dashboard during the first week to see which it is.
+
+### REDIS_COMMAND_BUDGET (a note, not a setting)
+
+There is deliberately no runtime counter: counting commands would itself
+cost commands. Keep the budget in mind instead:
+
+- Point uptime monitors at `/health/live` (0 commands), never at
+  `/health/ready` (2 commands: once a minute is 2,880 a day, 18% of the
+  budget).
+- Don't lower the rate limits' windows or add Redis calls to hot paths
+  without updating `tests/test_redis_budget.py` and this table.
+- If the budget runs out, Upstash refuses commands: rate limits and quotas
+  then **fail open** (logged loudly), and the LLM rate limiter refuses, so
+  answers stop with 503 until the month resets. Nothing is lost.

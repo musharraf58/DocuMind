@@ -10,12 +10,12 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import redis_keys
 from app.core.config import Settings, get_settings
 from app.core.errors import ApiError
 from app.core.passwords import password_problem
 from app.core.security import DUMMY_HASH, hash_password, verify_password
 from app.models import Document, User
+from app.services.quotas import Quotas
 from app.services.storage import StorageBackend
 
 logger = logging.getLogger(__name__)
@@ -116,9 +116,7 @@ async def delete_account(
     await db.delete(user)
     await db.commit()
     try:
-        for pattern in redis_keys.user_key_patterns(user_id):
-            async for key in redis.scan_iter(match=pattern):
-                await redis.delete(key)
+        await redis.delete(*Quotas(redis).user_keys(user_id))  # one command
     except (RedisError, OSError):
         logger.warning("Deleted account %s but could not clear its Redis keys", user_id)
 

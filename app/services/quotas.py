@@ -40,6 +40,9 @@ QUESTIONS = "questions"
 UPLOADS = "uploads"
 EMBED_TOKENS = "embed_tokens"
 GLOBAL_LLM = "llm"
+# The inbound rate-limit classes keyed by user (app/api/limits.py; the others
+# are keyed by IP or email).
+PER_USER_LIMIT_CLASSES = ("account", "ask", "upload", "default")
 # Old days' keys linger at most this long (the day itself plus a margin).
 KEY_TTL_SECONDS = 48 * 3600
 
@@ -51,6 +54,24 @@ if used + amount > tonumber(ARGV[2]) then return {0, used} end
 used = redis.call('INCRBY', KEYS[1], amount)
 redis.call('EXPIRE', KEYS[1], ARGV[3])
 return {1, used}
+"""
+
+# Admitting a question: three checks and one take in ONE command (it used to
+# be three: on Upstash every command counts against the monthly allowance).
+# KEYS: global LLM counter, user's embed tokens, user's questions.
+# ARGV: LLM limit, embed token limit, embed tokens needed, question limit, ttl.
+# Returns {verdict, used}: 0 admitted (questions used after), 1 no global LLM
+# capacity, 2 out of embedding tokens, 3 out of questions.
+_ADMIT = """
+local llm = tonumber(redis.call('GET', KEYS[1]) or '0')
+if llm >= tonumber(ARGV[1]) then return {1, llm} end
+local tokens = tonumber(redis.call('GET', KEYS[2]) or '0')
+if tokens + tonumber(ARGV[3]) > tonumber(ARGV[2]) then return {2, tokens} end
+local asked = tonumber(redis.call('GET', KEYS[3]) or '0')
+if asked + 1 > tonumber(ARGV[4]) then return {3, asked} end
+asked = redis.call('INCR', KEYS[3])
+redis.call('EXPIRE', KEYS[3], ARGV[5])
+return {0, asked}
 """
 
 # KEYS: counter. ARGV: amount, ttl. Adds unconditionally; returns the total.
@@ -94,6 +115,7 @@ class Quotas:
         self._now = now
         self._take = redis.register_script(_TAKE)
         self._add = redis.register_script(_ADD)
+        self._admit = redis.register_script(_ADMIT)
 
     # --- time -------------------------------------------------------------------
 
@@ -123,6 +145,18 @@ class Quotas:
             EMBED_TOKENS: s.DAILY_EMBED_TOKENS_PER_USER,
             GLOBAL_LLM: s.GLOBAL_DAILY_LLM_BUDGET,
         }[name]
+
+    def recent_days(self) -> list[str]:
+        """The quota days whose keys may still exist: a key expires
+        KEY_TTL_SECONDS (48 h) after its last write, so up to two days back."""
+        today = quota_day(self.now(), self.reset_hour)
+        return [(today - timedelta(days=n)).isoformat() for n in range(3)]
+
+    def user_keys(self, user_id: uuid.UUID) -> list[str]:
+        """Every Redis key holding this user's counters (see redis_keys)."""
+        return redis_keys.user_keys(
+            user_id, PER_USER_LIMIT_CLASSES, self.recent_days(), (QUESTIONS, UPLOADS, EMBED_TOKENS)
+        )
 
     def _user_key(self, user_id: uuid.UUID, name: str) -> str:
         return redis_keys.quota_user(user_id, self.day(), name)
@@ -167,6 +201,15 @@ class Quotas:
             return None
         return int(value or 0)
 
+    async def used_many(self, user_id: uuid.UUID, names: tuple[str, ...]) -> list[int] | None:
+        """Several of the user's counters in one command."""
+        try:
+            values = await self.redis.mget([self._user_key(user_id, name) for name in names])
+        except (RedisError, OSError) as exc:
+            outage_log.report("daily quotas are NOT enforced (fail open)", exc)
+            return None
+        return [int(value or 0) for value in values]
+
     async def global_llm_used(self) -> int | None:
         try:
             value = await self.redis.get(self._global_key())
@@ -206,6 +249,35 @@ class Quotas:
         limit = self.limit(EMBED_TOKENS)
         if used is not None and used + needed > limit:
             raise self._over(EMBED_TOKENS, "embedding token", used, limit)
+
+    async def admit_question(self, user_id: uuid.UUID) -> None:
+        """Before a question does any work: 503 if today's global answer
+        capacity is used up, 429 if the user is out of embedding tokens or
+        questions; otherwise take one question. One Redis command."""
+        keys = [
+            self._global_key(),
+            self._user_key(user_id, EMBED_TOKENS),
+            self._user_key(user_id, QUESTIONS),
+        ]
+        limits = [
+            self.limit(GLOBAL_LLM),
+            self.limit(EMBED_TOKENS),
+            1,
+            self.limit(QUESTIONS),
+            KEY_TTL_SECONDS,
+        ]
+        try:
+            verdict, used = await self._admit(keys=keys, args=limits)
+        except (RedisError, OSError) as exc:
+            outage_log.report("daily quotas are NOT enforced (fail open)", exc)
+            return
+        verdict, used = int(verdict), int(used)
+        if verdict == 1:
+            raise capacity_reached(self.seconds_until_reset())
+        if verdict == 2:
+            raise self._over(EMBED_TOKENS, "embedding token", used, self.limit(EMBED_TOKENS))
+        if verdict == 3:
+            raise self._over(QUESTIONS, "question", used, self.limit(QUESTIONS))
 
     async def take_question(self, user_id: uuid.UUID) -> None:
         taken = await self.take(user_id, QUESTIONS)

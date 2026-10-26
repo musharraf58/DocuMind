@@ -93,3 +93,24 @@ async def test_outbound_limiter_shares_one_window(real_redis):
     with pytest.raises(EmbeddingBusyError):
         await first.acquire(100, "query", max_wait=0)
     assert await second.usage() == (2, 200)
+
+
+async def test_question_admission_in_one_script(real_redis):
+    from app.core.errors import ApiError
+
+    settings = get_settings().model_copy(
+        update={"DAILY_QUESTIONS_PER_USER": 2, "GLOBAL_DAILY_LLM_BUDGET": 5}
+    )
+    quotas = Quotas(real_redis, settings)
+    user_id = uuid.uuid4()
+    await quotas.admit_question(user_id)
+    await quotas.admit_question(user_id)
+    with pytest.raises(ApiError) as caught:
+        await quotas.admit_question(user_id)
+    assert caught.value.status_code == 429 and caught.value.code == "daily_questions_quota_reached"
+    assert await quotas.used(user_id, QUESTIONS) == 2  # the refused one took nothing
+
+    await real_redis.set(quotas._global_key(), 5)  # today's answer capacity is gone
+    with pytest.raises(ApiError) as caught:
+        await quotas.admit_question(uuid.uuid4())
+    assert caught.value.status_code == 503
