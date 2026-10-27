@@ -50,6 +50,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Production refuses a weak key outright (Settings.check_production).
     if problem := settings.secret_key_problem():
         logger.warning("%s: fine for development, refused when APP_ENV=production", problem)
+    fake = "fake" in (settings.EMBEDDING_PROVIDER, settings.LLM_PROVIDER)
+    if settings.APP_ENV == "production" and fake:  # only possible with the explicit opt-in
+        logger.warning(
+            "PRODUCTION WITH FAKE PROVIDERS (ALLOW_FAKE_PROVIDERS_IN_PRODUCTION): answers and "
+            "search results are meaningless. For local testing only."
+        )
     docs = settings.DOCS_ENABLED
     app = FastAPI(
         title="DocuMind",

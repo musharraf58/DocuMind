@@ -293,6 +293,10 @@ class Settings(BaseSettings):
     DOCS_ENABLED: bool = True
     # In production, docs stay refused unless this explicit opt-in is set too.
     ALLOW_DOCS_IN_PRODUCTION: bool = False
+    # Production refuses the fake embedding/LLM providers unless this is set.
+    # Only for running the production configuration locally without paid keys
+    # (docker-compose.lite.yml); never set it on a real deployment.
+    ALLOW_FAKE_PROVIDERS_IN_PRODUCTION: bool = False
 
     @property
     def embedding_token_budget(self) -> int:
@@ -405,7 +409,8 @@ class Settings(BaseSettings):
             )
         if not self.RATE_LIMIT_ENABLED:
             problems.append("RATE_LIMIT_ENABLED must be true")
-        if self.EMBEDDING_PROVIDER == "fake" or self.LLM_PROVIDER == "fake":
+        fake = self.EMBEDDING_PROVIDER == "fake" or self.LLM_PROVIDER == "fake"
+        if fake and not self.ALLOW_FAKE_PROVIDERS_IN_PRODUCTION:
             problems.append("the fake embedding/LLM providers are for development only")
         code = self.INVITE_CODE.get_secret_value()
         if self.REGISTRATION_MODE == "invite" and 0 < len(code) < MIN_INVITE_CODE_LENGTH:

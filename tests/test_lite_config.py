@@ -1,15 +1,13 @@
 """render.yaml and .env.lite.example: complete, secret-free, and the
 production checks still refuse a weak configuration in lite mode."""
 
-from pathlib import Path
-
 import pytest
 import yaml
 from pydantic import ValidationError
 
 from app.core.config import Settings
+from tests.repo_files import repo_file
 
-ROOT = Path(__file__).resolve().parent.parent
 SECRETS = {
     "SECRET_KEY",
     "INVITE_CODE",
@@ -26,7 +24,7 @@ SECRETS = {
 
 @pytest.fixture(scope="module")
 def service() -> dict:
-    blueprint = yaml.safe_load((ROOT / "render.yaml").read_text())
+    blueprint = yaml.safe_load(repo_file("render.yaml").read_text())
     (web,) = blueprint["services"]
     return web
 
@@ -39,7 +37,7 @@ def render_env(service) -> dict[str, dict]:
 @pytest.fixture(scope="module")
 def lite_example() -> dict[str, str]:
     values = {}
-    for line in (ROOT / ".env.lite.example").read_text().splitlines():
+    for line in repo_file(".env.lite.example").read_text().splitlines():
         if line.strip() and not line.lstrip().startswith("#"):
             key, _, value = line.partition("=")
             values[key.strip()] = value.strip()
@@ -131,3 +129,56 @@ def test_weak_lite_configs_are_refused(lite_example, override, problem):
     # The rejected values themselves are never echoed.
     assert "lite-test-0123456789" not in str(caught.value)
     assert "key-secret" not in str(caught.value)
+
+
+def test_render_never_allows_fake_providers(render_env, lite_example):
+    assert "ALLOW_FAKE_PROVIDERS_IN_PRODUCTION" not in render_env
+    assert "ALLOW_FAKE_PROVIDERS_IN_PRODUCTION" not in lite_example
+
+
+def test_fake_providers_in_production_need_the_explicit_opt_in(lite_example):
+    fake = filled(lite_example, EMBEDDING_PROVIDER="fake", LLM_PROVIDER="fake")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **fake)
+    settings = Settings(_env_file=None, ALLOW_FAKE_PROVIDERS_IN_PRODUCTION="true", **fake)
+    assert settings.LLM_PROVIDER == "fake"
+    # The opt-in covers only the providers: a weak key is still refused.
+    with pytest.raises(ValidationError, match="SECRET_KEY"):
+        Settings(
+            _env_file=None,
+            ALLOW_FAKE_PROVIDERS_IN_PRODUCTION="true",
+            **{**fake, "SECRET_KEY": "change-me"},
+        )
+
+
+@pytest.fixture(scope="module")
+def lite_compose() -> dict:
+    return yaml.safe_load(repo_file("docker-compose.lite.yml").read_text())
+
+
+def test_local_lite_stack_mirrors_production(lite_compose):
+    services = lite_compose["services"]
+    assert "worker" not in services  # no Celery worker: inline ingestion
+    api = services["api"]
+    assert api["build"]["target"] == "prod"
+    assert api["mem_limit"] == api["memswap_limit"] == "512m"
+    env = api["environment"]
+    expected = {
+        "APP_ENV": "production",
+        "INGESTION_MODE": "inline",
+        "STORAGE_BACKEND": "s3",
+        "REGISTRATION_MODE": "invite",
+        "DOCS_ENABLED": "false",
+        "DB_PGBOUNCER": "true",
+    }
+    for key, value in expected.items():
+        assert env[key] == value, key
+    assert env["S3_ENDPOINT_URL"] == "http://s3:9000"
+    assert {"s3", "bucket", "postgres", "pgbouncer", "redis"} <= set(services)
+    # Secrets come from the generated env file, not the compose file.
+    assert env["SECRET_KEY"].startswith("${LITE_SECRET_KEY:?")
+    assert env["INVITE_CODE"].startswith("${LITE_INVITE_CODE:?")
+    # Every published port is bound to this machine only.
+    for service in services.values():
+        for port in service.get("ports", []):
+            assert port.startswith("127.0.0.1:"), port

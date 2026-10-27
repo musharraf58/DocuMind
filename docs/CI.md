@@ -23,6 +23,42 @@ enforces this). The `SECRET_KEY` in its `env` is a labelled throwaway value
 for a disposable test run. The GitHub token is read-only (`permissions:
 contents: read`).
 
+## Tests in the dev container
+
+`docker compose exec api pytest -q` runs the same suite inside the
+development image. A few tests check repository files the app itself never
+reads: `.env.example`, `.env.lite.example`, `.github/workflows/ci.yml`,
+`render.yaml` and `docker-compose.lite.yml`. CI has them from the checkout.
+The dev stage of the `Dockerfile` copies them in, next to the tests (the
+production stage doesn't).
+
+Why copy them rather than the alternatives:
+
+- **Not a bind mount.** The tests themselves are copied in at build time, so
+  their input files come from the same snapshot. Mounting the files live
+  would pair them with tests from an older build.
+- **Not a skip.** These tests catch real regressions: an unknown setting in an
+  example file, a secret in the workflow, a weak lite config. A skip would
+  pass silently wherever the files are missing.
+
+To keep this from drifting:
+
+- Tests read these files through `tests/repo_files.py` (`repo_file(...)`),
+  which only accepts names listed in `REPO_FILES`. A missing file fails with
+  the fix ("rebuild the image") instead of a bare `FileNotFoundError`. It
+  never skips, in CI or anywhere else.
+- `test_the_dev_image_has_every_repo_file_the_tests_read` checks that the
+  dev stage copies every file in `REPO_FILES`.
+
+A test that needs a new repository file:
+
+1. Read it with `repo_file(...)`.
+2. Add its name to `REPO_FILES`.
+3. Add it to the dev stage's `COPY` lines.
+
+After changing one of these files, rebuild before testing in the container:
+`docker compose build api && docker compose up -d api worker`.
+
 ## Status badge
 
 Replace `OWNER/REPO` (for this repository: `musharraf58/DocuMind`):

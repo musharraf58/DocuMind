@@ -3,18 +3,16 @@
 import re
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 import yaml
 
-ROOT = Path(__file__).resolve().parent.parent
-WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+from tests.repo_files import REPO_FILES, ROOT, repo_file
 
 
 @pytest.fixture(scope="module")
 def workflow() -> dict:
-    return yaml.safe_load(WORKFLOW.read_text())
+    return yaml.safe_load(repo_file(".github/workflows/ci.yml").read_text())
 
 
 def test_runs_on_pull_requests_and_pushes_to_main(workflow):
@@ -42,7 +40,23 @@ def test_token_is_read_only(workflow):
 def test_no_secrets_are_referenced():
     """Nothing in CI needs a secret: providers are fake, services are
     throwaway containers. A `secrets.` reference would mean one crept in."""
-    assert not re.search(r"\$\{\{\s*secrets\.", WORKFLOW.read_text())
+    assert not re.search(r"\$\{\{\s*secrets\.", repo_file(".github/workflows/ci.yml").read_text())
+
+
+def dev_stage_copies() -> set[str]:
+    """Sources of the COPY lines in the Dockerfile's dev stage."""
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    stage = dockerfile.split("AS dev", 1)[1].split("\nFROM ", 1)[0]
+    sources = set()
+    for line in stage.splitlines():
+        if line.startswith("COPY ") and "--from" not in line:
+            sources.update(line.split()[1:-1])
+    return sources
+
+
+def test_the_dev_image_has_every_repo_file_the_tests_read():
+    """Otherwise `docker compose exec api pytest` fails where CI passes."""
+    assert set(REPO_FILES) <= dev_stage_copies()
 
 
 @pytest.mark.skipif(shutil.which("actionlint") is None, reason="actionlint not installed")
