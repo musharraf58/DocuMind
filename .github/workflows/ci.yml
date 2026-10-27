@@ -68,8 +68,8 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://documind:documind@localhost:5432/documind
       REDIS_URL: redis://localhost:6379/0
       SECRET_KEY: ci-only-throwaway-value-not-a-real-secret-0123456789
-      EMBEDDING_PROVIDER: fake
-      LLM_PROVIDER: fake
+      # No provider settings here: the tests force the fake providers themselves
+      # (tests/conftest.py), and test_config checks the real defaults.
       # Tests that need a real server fail instead of skipping (tests/test_real_redis.py).
       REQUIRE_REAL_SERVICES: "1"
     steps:
