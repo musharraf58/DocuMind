@@ -4,23 +4,28 @@ How DocuMind is put together, from the code. The endpoints are in
 [API.md](API.md), every limit in [SECURITY.md](SECURITY.md), running and
 deploying in [OPERATIONS.md](OPERATIONS.md).
 
-## Components (full mode)
+## Components
 
-```
-                      ┌──────────────────────────── Postgres + pgvector ──────────────────┐
-                      │  documents (status, attempts, timestamps)   chunks (text, vector) │
-                      └──────▲──────────────────────────────────────────────▲────────────┘
-                             │ 1. save "pending", COMMIT                   │ claim, heartbeat,
-                             │                                             │ one transaction → ready
-  client ──HTTP──► API (FastAPI) ──2. enqueue(document id)──►  Redis  ──► Worker (Celery, 1 job
-    ▲                │   ▲                                   │ queue │      at a time)
-    │ 202 + status   │   └── search: embed the query ───────►│ rate- │◄──── ingestion: embed
-    └────────────────┘                                       │ limit │      the chunks
-                                                             │window │      │
-                                                             └───────┘      ▼
-                                                     shared by both    Voyage AI (embeddings)
-                                                                        sweeper (every minute
-                                                                        + at worker start)
+DocuMind runs in two modes with the same code. They differ only in where
+document jobs run and what holds the files.
+
+### Full mode (Docker Compose)
+
+```mermaid
+flowchart LR
+    client["Client"] -->|HTTP| api["API<br/>FastAPI, app/main.py"]
+    api -->|"1. save file"| disk[("Local disk<br/>STORAGE_BACKEND=local")]
+    api -->|"2. document 'pending', COMMIT"| pg[("Postgres + pgvector<br/>users, documents, chunks,<br/>conversations, usage")]
+    api -->|"3. enqueue id"| redis[("Redis<br/>Celery broker, rate limits,<br/>quotas, worker heartbeat")]
+    redis -->|"job"| worker["Celery worker<br/>one job at a time<br/>+ beat: sweeper, retention"]
+    worker -->|"claim, heartbeat,<br/>chunks + vectors"| pg
+    worker -->|"read file"| disk
+    worker -->|"embed chunks"| voyage["Voyage AI"]
+    api -->|"embed the question"| voyage
+    api -->|"search"| pg
+    api -->|"answer"| gemini["Gemini"]
+    api -.->|"shared rate-limit windows"| redis
+    worker -.->|"shared rate-limit windows"| redis
 ```
 
 - **API** (`app/main.py`): accepts uploads, saves the file and the document as `pending`,
@@ -40,12 +45,116 @@ deploying in [OPERATIONS.md](OPERATIONS.md).
 - **Postgres** holds the truth: the queue may lose or repeat a message; the database state
   decides what actually happens.
 
+
+### Lite mode (free tier, `INGESTION_MODE=inline`)
+
+```mermaid
+flowchart LR
+    client["Browser or client"] -->|HTTPS| proxy["Render proxy"]
+    proxy --> api
+    subgraph instance["One Render web instance, 512 MB"]
+        api["API<br/>FastAPI"] -->|"enqueue id"| queue["InlineJobQueue<br/>in memory, bounded, no duplicates"]
+        queue --> inline["InlineWorker<br/>one job at a time"]
+        maint["Maintenance task<br/>sweeper + retention,<br/>every MAINTENANCE_INTERVAL_SECONDS"]
+    end
+    api -->|"save, stream"| s3[("S3 bucket<br/>R2 or B2")]
+    inline -->|"read file"| s3
+    api -->|"pooled, PgBouncer"| neon[("Neon Postgres + pgvector")]
+    inline --> neon
+    maint --> neon
+    maint -.->|"re-enqueue"| queue
+    api -.->|"rate limits, quotas"| upstash[("Upstash Redis")]
+    inline -.->|"embedding rate limit,<br/>token quota"| upstash
+    inline -->|"embed chunks"| voyage["Voyage AI"]
+    api -->|"embed the question"| voyage
+    api -->|"answer"| gemini["Gemini"]
+```
+
+- **No Celery worker.** `app/services/inline_worker.py`: uploads go to an
+  in-memory queue (`INLINE_QUEUE_CAPACITY`, 20) and one background task runs
+  them through `jobs.process_document`, the same function the Celery task
+  calls. The claim, heartbeat, retries and failure handling are shared.
+- **The queue may forget; Postgres doesn't.** A restart empties the queue.
+  The maintenance task (`app/services/background.py`) runs the same sweeper
+  at startup and every `MAINTENANCE_INTERVAL_SECONDS`, so documents left
+  `pending` or stuck `processing` are found again in the database.
+- **Redis only counts.** No broker and no worker heartbeat: an idle app
+  sends Upstash no commands ([HARDENING.md](HARDENING.md), section 4).
+- **Files in a bucket**, because the instance's disk is wiped on every
+  restart (`app/services/s3_storage.py`).
+
 ## Ingestion: extraction and chunking
 
 Processing turns an uploaded document into **chunks**: pieces of its text of at most
 `CHUNK_TOKENS` tokens (default 500), each sharing about `CHUNK_OVERLAP_TOKENS` (default 60)
 with the previous one. Each chunk is then **embedded** (turned into a vector) so it can be
 searched by meaning (see [Embeddings](#embeddings) below).
+
+### The ingestion sequence
+
+Upload, then everything after the `202` happens in the background. The
+worker is the Celery worker in full mode and the inline worker in lite mode;
+both run `jobs.process_document` (`app/services/jobs.py`).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant A as API
+    participant S as Storage
+    participant P as Postgres
+    participant Q as Queue
+    participant W as Worker
+    participant V as Voyage
+    participant Sw as Sweeper
+
+    C->>A: POST /collections/{id}/documents
+    A->>A: upload rate limit (Redis), the demo account gets 403
+    A->>P: own collection? (404) inline queue full? (503) database near its cap? (503)<br/>storage, document and in-progress caps (locks the user's uploads)
+    A->>A: daily embedding tokens left, take one daily upload (Redis)
+    A->>S: stream the file (type, size and SHA-256 checked while streaming)
+    A->>P: INSERT document, status "pending", COMMIT
+    Note over A,P: a duplicate file (same hash) fails the unique constraint: 409, file deleted
+    A->>Q: enqueue(document id)
+    A-->>C: 202, status "pending"
+    Q->>W: document id
+    W->>P: claim: UPDATE ... WHERE status = 'pending'<br/>→ "processing", attempts + 1, new run id, COMMIT
+    Note over W,P: not pending any more (a duplicate delivery, deleted, done): skip
+    W->>S: read the file
+    W->>W: extract text and chunk it (in a thread)
+    W->>W: check the owner's daily embedding tokens
+    loop each token-sized batch
+        W->>P: heartbeat (only while the run id still matches)
+        W->>V: embed the batch (waits for the shared rate-limit window)
+    end
+    W->>P: one transaction: delete old chunks, insert new chunks + vectors, "ready"
+    alt transient failure (rate limit, outage, timeout) with attempts left
+        W->>P: back to "pending" with the reason
+        W->>Q: enqueue again after 30 s, 60 s, 120 s...
+    else permanent failure or attempts used up
+        W->>P: "failed" with a short error message
+    end
+
+    Note over Sw: at startup, then every minute (full mode, Celery beat)<br/>or every MAINTENANCE_INTERVAL_SECONDS (lite mode)
+    Sw->>P: "processing" with no heartbeat for STALE_PROCESSING_MINUTES:<br/>back to "pending" (or "failed" with no attempts left), run id cleared
+    Sw->>P: "pending" longer than SWEEP_PENDING_MINUTES: queued_at reset
+    Sw->>Q: enqueue those documents again
+```
+
+The document's states:
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: upload
+    pending --> processing: claim (attempts + 1)
+    processing --> ready: chunks and vectors saved
+    processing --> pending: transient failure, attempts left
+    processing --> pending: sweeper, heartbeat stale
+    processing --> pending: shutdown (inline mode, attempt not counted)
+    processing --> failed: permanent failure, or attempts used up
+    ready --> pending: reprocess
+    failed --> pending: reprocess
+```
 
 How it works:
 
@@ -193,6 +302,53 @@ The defaults were chosen by measurement: see [EVALUATION.md](EVALUATION.md).
 
 ## How a question flows through the system
 
+### The ask/stream sequence
+
+`POST /collections/{id}/ask/stream` (`app/api/ask.py`,
+`app/services/ask_stream.py`, `app/services/answering.py`). `/ask` runs the
+same steps and returns the result as one JSON response.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant A as API
+    participant R as Redis
+    participant P as Postgres
+    participant V as Voyage
+    participant G as Gemini
+
+    C->>A: POST /collections/{id}/ask/stream {question, conversation_id?}
+    A->>R: per-user "ask" rate limit (429 + Retry-After)
+    A->>R: admission, one Lua script: global LLM capacity (503),<br/>embedding tokens and questions left (429), take one question
+    A->>P: own collection and conversation? (404) conversation busy? (409)<br/>save the question and an "in progress" answer
+    A-->>C: event: meta {conversation_id, message_id}
+    opt follow-up question
+        A->>G: rewrite into a standalone question (one LLM budget unit)
+    end
+    A->>V: embed the question (shared rate limiter)
+    A->>P: hybrid search, filtered by owner and collection:<br/>vector (HNSW) + full text, fused with RRF
+    A->>A: relevance gate: RAG_MAX_DISTANCE (+ slack for strong keyword matches)
+    alt nothing relevant
+        A->>P: save "I could not find this in your documents", grounded = false
+        A-->>C: event: token (that text), then event: done
+        Note over A,G: the LLM is not called
+    else relevant sources
+        A->>A: number the sources [1], [2]... within RAG_CONTEXT_TOKEN_BUDGET,<br/>build the prompt (rules, then sources as data)
+        A->>R: global LLM budget unit, LLM rate limit
+        A->>G: stream the answer
+        loop as text arrives
+            G-->>A: piece
+            A-->>C: event: token {text}
+        end
+        A->>A: validate citations: keep [n] that match a source, remove the rest
+        A->>P: save the answer, grounded flag, citation snapshots, token usage
+        A-->>C: event: done {answer, grounded, citations, usage}
+    end
+    Note over C,A: a heartbeat comment every STREAM_HEARTBEAT_SECONDS while waiting
+    Note over A,P: provider error: answer saved "failed", event: error {message, status, retry_after}<br/>client disconnects: Gemini request closed, answer saved "cancelled"
+```
+
 ```
 question
   │ 1. validate: empty, or longer than ASK_MAX_QUESTION_CHARS → 422 (nothing embedded)
@@ -286,3 +442,121 @@ Set `LLM_PROVIDER=gemini` and `LLM_API_KEY` (from Google AI Studio). Settings:
 **Free-tier limits** are no longer published by Google; see your project's page in AI
 Studio. An independent measurement found 15 requests per minute and 500 per day for this
 model, so `LLM_RPM_LIMIT` defaults to 10. Daily quotas reset at midnight Pacific time.
+
+## Data model
+
+From `app/models/`. Every table that holds user data carries `owner_id`,
+and every query filters on it: another user's rows answer 404, the same as
+missing ones. Deleting a user, collection, document or conversation removes
+everything under it (`ON DELETE CASCADE`).
+
+```mermaid
+erDiagram
+    users ||--o{ collections : owns
+    users ||--o{ documents : owns
+    users ||--o{ chunks : owns
+    users ||--o{ conversations : owns
+    users ||--o{ messages : owns
+    users ||--o{ usage_events : "is charged"
+    collections ||--o{ documents : contains
+    collections ||--o{ chunks : contains
+    collections ||--o{ conversations : "is asked in"
+    documents ||--o{ chunks : "is split into"
+    conversations ||--o{ messages : contains
+
+    users {
+        uuid id PK
+        string email UK
+        string hashed_password "argon2"
+        int token_version "bumped on password change"
+        bool is_demo "shared read-only account"
+        timestamptz created_at
+    }
+    collections {
+        uuid id PK
+        uuid owner_id FK
+        string name
+        text description
+        timestamptz created_at
+    }
+    documents {
+        uuid id PK
+        uuid collection_id FK
+        uuid owner_id FK
+        string original_filename "display only"
+        string content_type
+        bigint size_bytes
+        string content_hash "SHA-256, unique per collection"
+        string storage_key UK "owner id / document id"
+        enum status "pending, processing, ready, failed"
+        text error_message
+        int attempts
+        uuid processing_run_id "the run allowed to write"
+        timestamptz queued_at
+        timestamptz processing_started_at
+        timestamptz heartbeat_at
+        timestamptz finished_at
+        timestamptz created_at
+    }
+    chunks {
+        uuid id PK
+        uuid document_id FK
+        uuid owner_id FK
+        uuid collection_id FK
+        int chunk_index "unique per document"
+        text content
+        int page_number
+        text section_title
+        int token_count
+        vector embedding "1024 dimensions, HNSW index"
+        text embedding_model
+        tsvector search_vector "generated, GIN index"
+        timestamptz created_at
+    }
+    conversations {
+        uuid id PK
+        uuid owner_id FK
+        uuid collection_id FK
+        string title
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    messages {
+        uuid id PK
+        uuid conversation_id FK
+        uuid owner_id FK
+        enum role "user, assistant"
+        text content
+        enum status
+        bool grounded
+        jsonb citations "snapshots: name, page, snippet"
+        int prompt_tokens
+        int completion_tokens
+        text error_message
+        timestamptz created_at
+    }
+    usage_events {
+        bigint id PK
+        uuid user_id FK
+        enum kind "embed_document, embed_query, llm_answer, llm_rewrite"
+        int tokens_in
+        int tokens_out
+        string model
+        uuid document_id "plain id, no foreign key"
+        uuid conversation_id "plain id, no foreign key"
+        timestamptz created_at
+    }
+    embedding_cache {
+        text model PK
+        string input_type PK
+        int dimensions PK
+        string text_sha256 PK
+        vector embedding
+        timestamptz created_at
+    }
+```
+
+`embedding_cache` belongs to no user: it maps (model, input type,
+dimensions, SHA-256 of the text) to a vector, so the evaluation and the demo
+seed never pay twice for the same text. Usage events keep plain ids, not
+foreign keys, so the history survives deleting a document or conversation.
