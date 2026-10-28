@@ -31,6 +31,13 @@ services:
         value: invite
       - key: DOCS_ENABLED
         value: "false"
+      # The demo page at /demo (and / redirects there).
+      - key: DEMO_UI_ENABLED
+        value: "true"
+      # One line under the login form, e.g. the demo login. Set it in the
+      # dashboard: it's shown to every visitor but never committed.
+      - key: DEMO_UI_HINT
+        sync: false
       - key: LOG_FORMAT
         value: json
       # 0, measured on the live service: with 1, a client's own fake

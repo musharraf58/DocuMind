@@ -2,6 +2,7 @@
 
 This is a JSON API: nothing it returns should ever be rendered as a page,
 framed, sniffed into another type, or cached when it holds a user's data.
+The one page it serves, /demo, gets its own strict policy (DEMO_CSP).
 """
 
 from starlette.datastructures import MutableHeaders
@@ -24,6 +25,14 @@ ALWAYS = {
 API_CSP = "default-src 'none'; frame-ancestors 'none'"
 # The docs pages load Swagger UI / ReDoc from a CDN, so they skip the strict CSP.
 DOCS_PATHS = ("/docs", "/redoc")
+# The demo page (app/api/demo_ui.py) loads only its own files and talks only
+# to this API: no inline script or style, no other origin, no plugins, no
+# <base> tag, no framing. Anything injected into the page could not run.
+DEMO_CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; "
+    "connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; "
+    "form-action 'self'; frame-ancestors 'none'"
+)
 HSTS = "max-age=31536000; includeSubDomains"
 
 
@@ -51,7 +60,9 @@ class SecurityHeadersMiddleware:
                 headers = MutableHeaders(scope=message)
                 for name, value in ALWAYS.items():
                     headers.setdefault(name, value)
-                if not path.startswith(DOCS_PATHS):
+                if path == "/demo" or path.startswith("/demo/"):
+                    headers.setdefault("Content-Security-Policy", DEMO_CSP)
+                elif not path.startswith(DOCS_PATHS):
                     headers.setdefault("Content-Security-Policy", API_CSP)
                 if private:
                     headers["Cache-Control"] = "no-store"

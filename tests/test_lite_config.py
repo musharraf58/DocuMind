@@ -189,3 +189,11 @@ def test_render_trusts_no_forwarded_for_entry(render_env, lite_example):
     trusted and per-IP limits never applied (docs/HARDENING.md, section 6)."""
     assert render_env["TRUSTED_PROXY_COUNT"]["value"] == "0"
     assert lite_example["TRUSTED_PROXY_COUNT"] == "0"
+
+
+def test_render_serves_the_demo_page_with_the_hint_set_in_the_dashboard(render_env, lite_example):
+    assert render_env["DEMO_UI_ENABLED"]["value"] == "true"
+    # Shown to every visitor, but it may hold the demo login: never committed.
+    assert render_env["DEMO_UI_HINT"] == {"key": "DEMO_UI_HINT", "sync": False}
+    assert lite_example["DEMO_UI_ENABLED"] == "true"
+    assert lite_example["DEMO_UI_HINT"] == ""

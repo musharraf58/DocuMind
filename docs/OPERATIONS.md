@@ -161,6 +161,11 @@ What changes compared with Docker Compose, and why:
    It creates (or updates) the read-only demo account and its sample
    collection from `demo/corpus/`. Run it again any time; it only changes
    what changed.
+8. **Demo page.** `render.yaml` sets `DEMO_UI_ENABLED=true`, so the app
+   serves the demo page at `/demo` and redirects `/` there. To show visitors
+   how to log in, set `DEMO_UI_HINT` in the dashboard (for example
+   "Demo login: demo@example.com / <the password>"); it appears under the
+   login form.
 
 `.env.lite.example` lists every variable lite mode needs. With
 `APP_ENV=production` the app refuses to start on a weak configuration (weak
@@ -176,6 +181,28 @@ limits and the daily quotas still apply to each person. Details and how to
 re-check: [docs/HARDENING.md](HARDENING.md), "6. The client address
 behind Render". A count that is too low only makes limits shared, never
 bypassable; never raise it without repeating that test.
+
+### The demo page
+
+`app/static/demo/`: plain HTML, one CSS file and JavaScript modules, served
+by the API itself (`app/api/demo_ui.py`) only when `DEMO_UI_ENABLED=true`.
+No build step and nothing from another origin (no CDN, fonts or
+third-party scripts). It:
+
+- polls `/health/live` before showing the login form, with a "waking the
+  server" message while the free instance starts. The page itself is served
+  by the same instance, so a visitor arriving at a sleeping instance waits
+  for the page first; the message shows when the page was already open;
+- keeps the access token in memory only (a reload logs out);
+- streams answers from `POST .../ask/stream` with `fetch` and a
+  `ReadableStream` (an `EventSource` can't send a POST), parsed by
+  `sse.js`, then replaces the streamed text with the checked answer from
+  the `done` event and shows the citations;
+- shows upload controls only to non-demo accounts (`is_demo` from
+  `GET /auth/me`), and a banner that the demo account is shared and public.
+
+Its security rules (no HTML from text, a strict Content-Security-Policy)
+are in [SECURITY.md](SECURITY.md#the-demo-page).
 
 ### Living with the free tier
 
@@ -235,6 +262,8 @@ with comments; a test checks that every setting appears here.
 | `LOGIN_FAILURE_WINDOW_MINUTES` | `15` | Failures are forgotten after this long without one |
 | `DEMO_EMAIL` | (empty) | The shared read-only demo account (`scripts/seed_demo.py`) |
 | `DEMO_PASSWORD` | (empty) | Its password; read by the seed script only |
+| `DEMO_UI_ENABLED` | `false` | Serve the demo page at `/demo`, and redirect `/` to it |
+| `DEMO_UI_HINT` | (empty) | One line under the demo page's login form, shown to every visitor |
 
 ### Storage and uploads
 

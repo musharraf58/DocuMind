@@ -289,6 +289,12 @@ class Settings(BaseSettings):
     # only (the app itself never reads these). Never commit real values.
     DEMO_EMAIL: str = ""
     DEMO_PASSWORD: SecretStr = SecretStr("")
+    # The demo page (/demo, app/static/demo/; / redirects to it when enabled).
+    DEMO_UI_ENABLED: bool = False
+    # One line shown under the demo page's login form, e.g. how to log in to
+    # the demo account. Shown to every visitor; empty: no hint. Kept out of
+    # the page source so no credential is ever committed.
+    DEMO_UI_HINT: str = Field(default="", max_length=300)
     # Interactive API docs (/docs, /redoc, /openapi.json).
     DOCS_ENABLED: bool = True
     # In production, docs stay refused unless this explicit opt-in is set too.

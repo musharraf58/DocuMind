@@ -30,6 +30,7 @@ rate limit and quota on each endpoint are in [SECURITY.md](SECURITY.md).
 | GET | `/conversations` | [Your conversations](#conversations) |
 | GET, PATCH, DELETE | `/conversations/{id}` | One conversation: messages, rename, delete |
 | GET | `/usage` | Your usage and quotas today and this month ([SECURITY.md](SECURITY.md#usage-tracking)) |
+| GET | `/demo`, `/` | The demo page; `/` redirects to it. Only with `DEMO_UI_ENABLED=true` ([OPERATIONS.md](OPERATIONS.md#the-demo-page)) |
 
 The demo account gets `403 demo_read_only` on every endpoint that changes
 something ([SECURITY.md](SECURITY.md#the-demo-account)).

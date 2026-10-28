@@ -193,7 +193,8 @@ They keep disk use and the single worker's queue bounded.
 - **Security headers** on every response: `X-Content-Type-Options: nosniff`,
   `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
   `Cross-Origin-Resource-Policy: same-origin`, a `Content-Security-Policy` that allows
-  nothing (except on the docs pages), and HSTS in production.
+  nothing (except on the docs pages, and a strict one of its own on the
+  [demo page](#the-demo-page)), and HSTS in production.
 - **`Cache-Control: no-store`** on authenticated responses and on `/auth/*`, so proxies
   and browsers never keep a copy of your data or a token.
 - **CORS**: closed unless `CORS_ORIGINS` lists origins (comma-separated). `*` is refused
@@ -282,3 +283,29 @@ the password, deleting the account) answers `403` with code
 `demo_read_only` (`app/api/demo.py`). It may log in, list, read, search and
 ask, within the same per-user limits and daily quotas as anyone. Everyone
 who uses it shares its data and its quotas, so nothing private belongs in it.
+
+## The demo page
+
+The page at `/demo` ([OPERATIONS.md](OPERATIONS.md#the-demo-page)) shows
+text that nobody controls: model output, document snippets, file names,
+conversation titles. It is built so that none of it can ever run as code:
+
+- **Text goes in as text.** Every dynamic value is inserted with
+  `textContent` or as a text node, never parsed as HTML. A test
+  (`tests/test_demo_ui.py`) fails if the page's JavaScript contains
+  `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `eval` or
+  `document.write`.
+- **A strict Content-Security-Policy** on every `/demo` response:
+  `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self';
+  connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none';
+  form-action 'self'; frame-ancestors 'none'`. No inline script or style
+  and no other origin: even if markup got in, the browser would refuse to
+  run it or send data anywhere else. The API keeps its own
+  `default-src 'none'`.
+- **The token stays in memory**, never in `localStorage`, `sessionStorage`
+  or a cookie (a test checks this too), so there is nothing stored for a
+  script to steal, and no cookie for another site to ride on.
+- **No credential in the source.** The login hint comes from the
+  `DEMO_UI_HINT` setting, set in the hosting dashboard.
+- **A visible warning** that the demo account is shared and public, and
+  that Gemini's free tier may use inputs.
