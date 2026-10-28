@@ -61,10 +61,10 @@ After changing one of these files, rebuild before testing in the container:
 
 ## Status badge
 
-Replace `OWNER/REPO` (for this repository: `musharraf58/DocuMind`):
+Replace `musharraf58/DocuMind` (for this repository: `musharraf58/DocuMind`):
 
 ```markdown
-[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![CI](https://github.com/musharraf58/DocuMind/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/musharraf58/DocuMind/actions/workflows/ci.yml)
 ```
 
 ## Branch protection for `main` (do this once, by hand)

@@ -1,7 +1,7 @@
 # DocuMind
 
-<!-- CI badge: replace OWNER/REPO (here: musharraf58/DocuMind) once CI has run on main. -->
-[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+
+[![CI](https://github.com/musharraf/DocuMind/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/musharraf/DocuMind/actions/workflows/ci.yml)
 
 RAG knowledge base API. FastAPI (async), PostgreSQL + pgvector, SQLAlchemy 2.0 async, Redis.
 
