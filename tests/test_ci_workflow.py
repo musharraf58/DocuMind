@@ -33,6 +33,11 @@ def test_tests_run_against_real_postgres_and_redis(workflow):
     assert job["env"]["REQUIRE_REAL_SERVICES"] == "1"
 
 
+def test_the_demo_page_javascript_is_tested(workflow):
+    commands = [step.get("run", "") for step in workflow["jobs"]["lint"]["steps"]]
+    assert "node --test tests/js/" in commands
+
+
 def test_token_is_read_only(workflow):
     assert workflow["permissions"] == {"contents": "read"}
 
