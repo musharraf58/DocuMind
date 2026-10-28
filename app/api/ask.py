@@ -109,7 +109,7 @@ async def ask_stream(
 ):
     """Like /ask, but streams the answer as server-sent events: meta, then
     token events as text is generated, then done (the final answer, with
-    invalid citations removed: keep this one) or error. See the README.
+    invalid citations removed: keep this one) or error. See docs/API.md.
 
     Problems found before streaming starts are ordinary HTTP errors: 422 for
     the question, 404 for a collection or conversation that isn't yours,

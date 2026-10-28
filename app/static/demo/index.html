@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DocuMind demo</title>
+    <link rel="icon" href="/demo/static/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/demo/static/demo.css" />
+    <script type="module" src="/demo/static/app.js"></script>
+  </head>
+  <body>
+    <header class="top">
+      <h1>DocuMind</h1>
+      <p class="tagline">Ask questions about documents; answers cite their sources.</p>
+      <div id="account" class="account" hidden>
+        <span id="account-email"></span>
+        <button id="logout" type="button" class="secondary">Log out</button>
+      </div>
+    </header>
+
+    <aside class="banner" role="note">
+      <strong>This is a public demo.</strong>
+      The demo account is shared by everyone and read-only: other visitors can see the
+      questions you ask. Don't enter anything private. Answers are written by Google's
+      Gemini on its free tier, which may use what you send to improve Google's products.
+    </aside>
+
+    <noscript><p class="error">This demo needs JavaScript.</p></noscript>
+
+    <main>
+      <section id="waking" class="panel" hidden aria-live="polite">
+        <p class="waking">
+          <span class="spinner" aria-hidden="true"></span>
+          Waking the server, this can take about a minute…
+        </p>
+        <p class="muted">
+          The free hosting plan puts the server to sleep when nobody uses it.
+        </p>
+      </section>
+
+      <section id="login" class="panel narrow" hidden aria-labelledby="login-title">
+        <h2 id="login-title">Log in</h2>
+        <form id="login-form">
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" autocomplete="username" required />
+          <label for="password">Password</label>
+          <input
+            id="password"
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            required
+          />
+          <button type="submit">Log in</button>
+        </form>
+        <p id="hint" class="hint" hidden></p>
+        <p id="login-error" class="error" role="alert"></p>
+      </section>
+
+      <div id="workspace" class="workspace" hidden>
+        <nav class="sidebar" aria-label="Collections and conversations">
+          <h2 id="collections-title">Collections</h2>
+          <ul id="collections" class="list" aria-labelledby="collections-title"></ul>
+          <form id="new-collection" class="owner-only inline-form" hidden>
+            <label for="collection-name">New collection</label>
+            <input id="collection-name" maxlength="255" required />
+            <button type="submit" class="secondary">Create</button>
+          </form>
+
+          <h2 id="conversations-title">Conversations</h2>
+          <button id="new-conversation" type="button" class="secondary">New conversation</button>
+          <ul id="conversations" class="list" aria-labelledby="conversations-title"></ul>
+        </nav>
+
+        <section class="chat" aria-labelledby="chat-title">
+          <h2 id="chat-title" tabindex="-1">Ask</h2>
+          <p id="chat-context" class="muted"></p>
+          <ol id="messages" class="messages" aria-live="polite" aria-busy="false"></ol>
+          <p id="chat-error" class="error" role="alert"></p>
+          <form id="ask-form">
+            <label for="question">Your question</label>
+            <textarea id="question" rows="3" maxlength="1000" required></textarea>
+            <div class="actions">
+              <button id="ask" type="submit">Ask</button>
+              <button id="stop" type="button" class="secondary" hidden>Stop</button>
+            </div>
+          </form>
+
+          <section id="documents-panel" class="owner-only" hidden aria-labelledby="documents-title">
+            <h2 id="documents-title">Documents</h2>
+            <form id="upload-form" class="inline-form">
+              <label for="file">Upload a PDF, DOCX, Markdown or text file</label>
+              <input id="file" type="file" accept=".pdf,.docx,.md,.txt" required />
+              <button type="submit" class="secondary">Upload</button>
+            </form>
+            <p id="upload-error" class="error" role="alert"></p>
+            <ul id="documents" class="list documents"></ul>
+          </section>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>

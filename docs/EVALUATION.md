@@ -184,3 +184,33 @@ costs one Gemini call, and usually ends in "the documents don't say".
 - **Distances are model-specific.** After changing `EMBEDDING_MODEL`, the threshold
   must be measured again; the cache keys by model, so the old vectors are simply
   not reused.
+
+## Running the evaluation
+
+`eval/` measures how well retrieval finds the right passage, without ever calling the LLM
+(free to run, repeatable, and it isolates the part that decides whether a good answer is
+possible). Details, and how to add documents and questions: [eval/README.md](../eval/README.md).
+Results and the reasoning behind the defaults: the sections above.
+
+```bash
+uv run python -m eval.dataset      # check questions.yaml
+uv run python -m eval.run          # one evaluation with the current settings
+uv run python -m eval.run --mode vector --chunk-tokens 300 --max-distance 0.65
+uv run python -m eval.sweep        # rejection rates across RAG_MAX_DISTANCE values
+uv run python -m eval.experiments  # vector / keyword / hybrid, strict / loose, chunk sizes
+```
+
+Each run ingests `eval/corpus/` with the real pipeline into a collection owned by
+`eval@documind.local`, asks every question in `eval/questions.yaml` through the real
+search code, prints a table and saves a JSON report (with the full configuration) under
+`eval/reports/`. Embeddings are cached in Postgres by (model, input type, dimensions,
+SHA-256 of the text), so the first run on a fresh database makes a few Voyage requests
+and every later one makes none.
+
+Reading the table:
+
+- **hit@k**: share of answerable questions whose right chunk is in the top k.
+- **MRR**: average of 1 / rank of the right chunk; rewards rank 1 over rank 3.
+- **falseRej**: answerable questions the relevance gate turned away (lower is better).
+- **rejected**: unanswerable questions the gate turned away (higher is better).
+- **Failed questions**: each with the rank of its right chunk and its top results.

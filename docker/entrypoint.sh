@@ -19,7 +19,7 @@ if [ "$#" -eq 0 ]; then
     # exec: uvicorn replaces this shell, so it receives SIGTERM directly and
     # shuts down cleanly (finishing requests, stopping background tasks).
     # --no-proxy-headers: the app decides about X-Forwarded-For itself
-    # (TRUSTED_PROXY_COUNT); see "Security and Limits" in the README.
+    # (TRUSTED_PROXY_COUNT); see docs/SECURITY.md.
     set -- uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}" \
         --no-proxy-headers --timeout-graceful-shutdown 20
 fi

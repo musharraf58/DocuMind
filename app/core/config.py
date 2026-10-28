@@ -248,7 +248,7 @@ class Settings(BaseSettings):
     # client is the Nth address from the right in X-Forwarded-For.
     TRUSTED_PROXY_COUNT: int = Field(default=0, ge=0, le=10)
     # Inbound rate limits ("N/second|minute|hour|day"), per endpoint class. See
-    # the README's "Security and Limits" for why each is what it is.
+    # docs/SECURITY.md for why each is what it is.
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_LOGIN_PER_IP: str = "10/minute"
     RATE_LIMIT_LOGIN_PER_EMAIL: str = "5/minute"
@@ -289,6 +289,12 @@ class Settings(BaseSettings):
     # only (the app itself never reads these). Never commit real values.
     DEMO_EMAIL: str = ""
     DEMO_PASSWORD: SecretStr = SecretStr("")
+    # The demo page (/demo, app/static/demo/; / redirects to it when enabled).
+    DEMO_UI_ENABLED: bool = False
+    # One line shown under the demo page's login form, e.g. how to log in to
+    # the demo account. Shown to every visitor; empty: no hint. Kept out of
+    # the page source so no credential is ever committed.
+    DEMO_UI_HINT: str = Field(default="", max_length=300)
     # Interactive API docs (/docs, /redoc, /openapi.json).
     DOCS_ENABLED: bool = True
     # In production, docs stay refused unless this explicit opt-in is set too.

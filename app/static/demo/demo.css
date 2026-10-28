@@ -1,0 +1,396 @@
+/* The demo page. System fonts only: nothing is loaded from another origin. */
+
+:root {
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --text: #1c1c1a;
+  --muted: #5f5f5a;
+  --border: #d9d9d4;
+  --accent: #2456c9;
+  --accent-text: #ffffff;
+  --accent-soft: #e6edfb;
+  --warn-bg: #fff6dd;
+  --warn-border: #e5c463;
+  --error: #b3261e;
+  --ok: #1e7a3a;
+  --radius: 8px;
+  --focus: 0 0 0 3px #8fb0f5;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615;
+    --surface: #1f1f1e;
+    --text: #ececea;
+    --muted: #a8a8a2;
+    --border: #3a3a37;
+    --accent: #7ea2f2;
+    --accent-text: #10131a;
+    --accent-soft: #24304a;
+    --warn-bg: #3a3019;
+    --warn-border: #8c7330;
+    --error: #ff8a80;
+    --ok: #7fd497;
+    --focus: 0 0 0 3px #4d6fbf;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.top,
+.banner,
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  padding-top: 16px;
+}
+
+.top h1 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.tagline {
+  margin: 0;
+  color: var(--muted);
+  flex: 1 1 260px;
+}
+
+.account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.banner {
+  margin-top: 12px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius);
+  max-width: calc(1100px - 32px);
+}
+
+@media (max-width: 1132px) {
+  .banner {
+    margin-left: 16px;
+    margin-right: 16px;
+  }
+}
+
+h2 {
+  font-size: 1.1rem;
+  margin: 16px 0 8px;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.narrow {
+  max-width: 420px;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+  margin: 10px 0 4px;
+}
+
+input,
+textarea {
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+textarea {
+  resize: vertical;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+  padding: 8px 14px;
+  margin-top: 10px;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+button.link {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  margin: 0;
+  text-align: left;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid transparent;
+  padding: 6px 8px;
+  overflow-wrap: anywhere;
+}
+
+button.link:hover {
+  background: var(--accent-soft);
+}
+
+button.link[aria-current="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(200px, 280px) 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.sidebar,
+.chat {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 16px 16px;
+  min-width: 0;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.list li {
+  margin: 2px 0;
+}
+
+.inline-form label {
+  font-weight: 400;
+}
+
+.messages {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.message {
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+
+.message p {
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+}
+
+.question {
+  background: var(--accent-soft);
+  margin-left: 15%;
+}
+
+.answer {
+  border: 1px solid var(--border);
+  margin-right: 5%;
+}
+
+.citations {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chip {
+  margin: 0;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.9rem;
+  background: transparent;
+  color: var(--accent);
+  border-color: var(--accent);
+  text-align: left;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.chip[aria-expanded="true"] {
+  background: var(--accent-soft);
+}
+
+.citation-details {
+  margin: 6px 0 4px 10px;
+  padding-left: 10px;
+  border-left: 3px solid var(--border);
+}
+
+.citation-document {
+  font-weight: 600;
+}
+
+.citation-where {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.citation-snippet {
+  margin: 4px 0 0;
+  font-size: 0.95rem;
+  white-space: pre-wrap;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.hint {
+  margin-top: 14px;
+  padding: 8px 10px;
+  background: var(--accent-soft);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+
+.error {
+  color: var(--error);
+  margin: 6px 0;
+}
+
+.error:empty {
+  display: none;
+}
+
+.note,
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 0.85rem;
+}
+
+.documents li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.status {
+  font-size: 0.85rem;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+
+.status-ready {
+  color: var(--ok);
+}
+
+.status-failed {
+  color: var(--error);
+}
+
+.waking {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+}
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  flex: none;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}
+
+/* Phone width: one column, the conversation first. */
+@media (max-width: 720px) {
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+  .chat {
+    order: -1;
+  }
+  .question {
+    margin-left: 8%;
+  }
+  .answer {
+    margin-right: 0;
+  }
+}

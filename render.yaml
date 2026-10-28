@@ -1,6 +1,6 @@
 # Render Blueprint: DocuMind in "lite mode" on Render's FREE web service.
-# (Dashboard -> New -> Blueprint -> this repository.) See "Running in lite
-# mode" in the README for the whole setup: Neon (Postgres), Upstash (Redis),
+# (Dashboard -> New -> Blueprint -> this repository.) See docs/OPERATIONS.md,
+# "Lite mode", for the whole setup: Neon (Postgres), Upstash (Redis),
 # an S3-compatible bucket (Cloudflare R2 or Backblaze B2).
 #
 # No secret is stored here. Every secret is declared with `sync: false`:
@@ -31,12 +31,20 @@ services:
         value: invite
       - key: DOCS_ENABLED
         value: "false"
+      # The demo page at /demo (and / redirects there).
+      - key: DEMO_UI_ENABLED
+        value: "true"
+      # One line under the login form, e.g. the demo login. Set it in the
+      # dashboard: it's shown to every visitor but never committed.
+      - key: DEMO_UI_HINT
+        sync: false
       - key: LOG_FORMAT
         value: json
-      # Render's proxy appends the client address to X-Forwarded-For. Verify
-      # after the first deploy (README, "Running in lite mode").
+      # 0, measured on the live service: with 1, a client's own fake
+      # X-Forwarded-For entry was trusted and it was never rate-limited
+      # (docs/HARDENING.md, "6. The client address behind Render").
       - key: TRUSTED_PROXY_COUNT
-        value: "1"
+        value: "0"
 
       # --- Neon Postgres ----------------------------------------------------
       - key: DATABASE_URL # the POOLED connection string (host contains "-pooler")

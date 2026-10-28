@@ -41,8 +41,9 @@ services:
       STORAGE_BACKEND: s3
       REGISTRATION_MODE: invite
       DOCS_ENABLED: "false"
+      DEMO_UI_ENABLED: "true" # as on Render: the demo page at /demo
       LOG_FORMAT: json
-      TRUSTED_PROXY_COUNT: "0" # no proxy in front locally (Render: 1)
+      TRUSTED_PROXY_COUNT: "0" # as on Render (docs/HARDENING.md, section 6)
       # libpq-style URLs, as Neon gives them; translated for asyncpg.
       DATABASE_URL: postgresql://documind:documind-lite@pgbouncer:6432/documind?sslmode=disable
       DATABASE_URL_DIRECT: postgresql://documind:documind-lite@postgres:5432/documind?sslmode=disable

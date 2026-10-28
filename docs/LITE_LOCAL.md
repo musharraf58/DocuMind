@@ -3,7 +3,7 @@
 `docker-compose.lite.yml` runs DocuMind the way it runs on Render's free
 tier, on your machine:
 
-| Production (README, "Running in lite mode") | Locally |
+| Production ([OPERATIONS.md](OPERATIONS.md#lite-mode-free-tier)) | Locally |
 | --- | --- |
 | Render free web service, 512 MB, no worker | the `api` container: the production image, `mem_limit: 512m`, no swap, `INGESTION_MODE=inline`, no Celery worker |
 | `APP_ENV=production`, docs off, invite-only | the same |
@@ -95,8 +95,13 @@ docker compose -f docker-compose.lite.yml --env-file .env.lite.local run --rm bu
 
 ```bash
 docker compose -f docker-compose.lite.yml --env-file .env.lite.local \
-  exec api python -m scripts.seed_demo
+  exec -e EMBEDDING_PROVIDER=fake -e LLM_PROVIDER=fake api python -m scripts.seed_demo
 ```
+
+`exec` starts a new process, which doesn't go through the API's entrypoint,
+where the fake providers are chosen; without the two `-e` flags the seed
+would try Voyage and fail with "Embedding API key is not configured". With
+real keys exported, leave the flags out: the defaults are Voyage and Gemini.
 
 It uses `DEMO_EMAIL` and `DEMO_PASSWORD` from `.env.lite.local`, stores the
 files from `demo/corpus/` in the S3 server and processes them. Run it again

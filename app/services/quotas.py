@@ -19,7 +19,7 @@ LLM calls are still bounded then, because the outbound provider limiter
 needs Redis too and refuses without it.
 
 Postgres (usage_events) is the durable history; these counters are only for
-enforcement. See the README ("Security and Limits") for how they relate.
+enforcement. See docs/SECURITY.md for how they relate.
 """
 
 import math

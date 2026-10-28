@@ -5,7 +5,17 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import ask, auth, collections, conversations, documents, health, search, usage
+from app.api import (
+    ask,
+    auth,
+    collections,
+    conversations,
+    demo_ui,
+    documents,
+    health,
+    search,
+    usage,
+)
 from app.api.errors import storage_unavailable
 from app.core.config import Settings, get_settings
 from app.core.database import SessionLocal
@@ -98,6 +108,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(ask.router)
     app.include_router(conversations.router)
     app.include_router(usage.router)
+    if settings.DEMO_UI_ENABLED:
+        app.include_router(demo_ui.make_router(settings))
     return app
 
 

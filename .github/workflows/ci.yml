@@ -36,6 +36,13 @@ jobs:
       - run: uv run ruff format --check .
       - name: Workflow files (actionlint, with shellcheck)
         run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -no-color
+      # The demo page's JavaScript (app/static/demo/): no build step and no
+      # npm packages, only Node's built-in test runner.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Demo page JavaScript (node --test)
+        run: node --test tests/js/*.test.mjs
 
   test:
     name: Tests (Postgres + pgvector, Redis)
