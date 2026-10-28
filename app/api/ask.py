@@ -33,10 +33,8 @@ async def admit_question(quotas: Quotas, user_id: uuid.UUID) -> None:
     """Before any work: 503 if today's global answer capacity is used up,
     429 if the user is out of questions or embedding tokens for today. Takes
     one question from the user's quota (given back if the question turns out
-    to be a 404 or 409)."""
-    await quotas.check_llm_capacity()
-    await quotas.check_embed_tokens(user_id)
-    await quotas.take_question(user_id)
+    to be a 404 or 409). One Redis command for all of it."""
+    await quotas.admit_question(user_id)
 
 
 @router.post(

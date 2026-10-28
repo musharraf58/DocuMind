@@ -14,7 +14,7 @@ async def test_register_returns_user_without_password_data(client: AsyncClient) 
     assert response.status_code == 201
     body = response.json()
     assert body["email"] == "alice@example.com"  # stored lowercase
-    assert set(body) == {"id", "email", "created_at"}
+    assert set(body) == {"id", "email", "created_at", "is_demo"}
 
 
 async def test_duplicate_email_is_rejected_case_insensitively(client: AsyncClient) -> None:

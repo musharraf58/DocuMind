@@ -1,0 +1,174 @@
+# Lite mode, locally, the way it runs in production (docs/LITE_LOCAL.md):
+#
+#   docker compose -f docker-compose.lite.yml --env-file .env.lite.local up -d --build
+#
+# A standalone file with its own project name: it shares nothing with the
+# development stack (docker-compose.yml) — no containers, volumes or ports.
+#
+#   api        the production image (Dockerfile target "prod"), 512 MB like
+#              Render's free instance, APP_ENV=production, INGESTION_MODE=inline:
+#              no Celery worker, the API processes documents itself
+#   s3         moto's standalone S3 server (STORAGE_BACKEND=s3): an in-memory
+#              emulator, so stored files vanish when it stops (docker/moto/)
+#   pgbouncer  transaction pooling in front of Postgres, like Neon's "-pooler"
+#              connection string (DB_PGBOUNCER=true); migrations go direct
+#   postgres   pgvector, as in production
+#   redis      as in production (Upstash), plain Redis locally
+#
+# Providers are FAKE unless you export real keys before `up`:
+#   export EMBEDDING_API_KEY=... LLM_API_KEY=...
+# (production refuses fake providers; ALLOW_FAKE_PROVIDERS_IN_PRODUCTION=true
+# below permits them for this local stack only, and the app logs a warning).
+#
+# Secrets come from .env.lite.local (generated, gitignored), never this file.
+# The S3 keys and the Postgres password below belong to throwaway local
+# containers that are not reachable from outside this machine.
+name: documind-lite
+
+services:
+  api:
+    build:
+      context: .
+      target: prod
+    image: documind:prod
+    mem_limit: 512m
+    memswap_limit: 512m # no swap: exceeding 512 MB gets the container killed, as on Render
+    ports:
+      - "127.0.0.1:${LITE_PORT:-8080}:8000"
+    environment:
+      APP_ENV: production
+      INGESTION_MODE: inline
+      STORAGE_BACKEND: s3
+      REGISTRATION_MODE: invite
+      DOCS_ENABLED: "false"
+      LOG_FORMAT: json
+      TRUSTED_PROXY_COUNT: "0" # no proxy in front locally (Render: 1)
+      # libpq-style URLs, as Neon gives them; translated for asyncpg.
+      DATABASE_URL: postgresql://documind:documind-lite@pgbouncer:6432/documind?sslmode=disable
+      DATABASE_URL_DIRECT: postgresql://documind:documind-lite@postgres:5432/documind?sslmode=disable
+      DB_PGBOUNCER: "true"
+      DB_POOL_SIZE: "3"
+      DB_MAX_OVERFLOW: "2"
+      DB_POOL_RECYCLE_SECONDS: "240"
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://s3:9000
+      S3_BUCKET: documind
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY_ID: documind-lite
+      S3_SECRET_ACCESS_KEY: documind-lite-s3-key
+      SECRET_KEY: ${LITE_SECRET_KEY:?run the setup in docs/LITE_LOCAL.md first}
+      INVITE_CODE: ${LITE_INVITE_CODE:?run the setup in docs/LITE_LOCAL.md first}
+      DEMO_EMAIL: ${DEMO_EMAIL:-}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-}
+      # Real keys if exported, otherwise empty (and the providers fake, below).
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      ALLOW_FAKE_PROVIDERS_IN_PRODUCTION: "true"
+    # Choose each provider from whether its key is set, then hand over to the
+    # image's normal entrypoint (migrations, then uvicorn).
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ -n "$$EMBEDDING_API_KEY" ]; then export EMBEDDING_PROVIDER=voyage; else export EMBEDDING_PROVIDER=fake; fi
+        if [ -n "$$LLM_API_KEY" ]; then export LLM_PROVIDER=gemini; else export LLM_PROVIDER=fake; fi
+        echo "lite: embeddings=$$EMBEDDING_PROVIDER llm=$$LLM_PROVIDER"
+        exec entrypoint.sh "$$@"
+      - sh
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      bucket:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 30s # Render allows 30 s; the running job gets 15 of them
+
+  # One-off: creates the bucket (if missing) before the API starts.
+  bucket:
+    image: documind:prod
+    build:
+      context: .
+      target: prod
+    entrypoint: ["python", "-m", "scripts.create_bucket"]
+    environment:
+      DATABASE_URL: postgresql://unused@postgres/unused # required setting, not used here
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: unused-by-the-bucket-script
+      S3_ENDPOINT_URL: http://s3:9000
+      S3_BUCKET: documind
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY_ID: documind-lite
+      S3_SECRET_ACCESS_KEY: documind-lite-s3-key
+    depends_on:
+      s3:
+        condition: service_healthy
+    restart: "no"
+
+  # In memory: everything stored here is gone when this container stops.
+  # moto accepts any access key; the app signs requests as with R2 or B2.
+  s3:
+    build: docker/moto
+    image: documind-moto:local
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/', timeout=3)"
+      interval: 5s
+      timeout: 4s
+      retries: 10
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: documind
+      DB_PASSWORD: documind-lite
+      DB_NAME: documind
+      POOL_MODE: transaction # what Neon uses
+      AUTH_TYPE: scram-sha-256
+      MAX_PREPARED_STATEMENTS: "0" # the strictest case: the app must not rely on them
+      LISTEN_PORT: "6432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: documind
+      POSTGRES_PASSWORD: documind-lite
+      POSTGRES_DB: documind
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U documind -d documind"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:

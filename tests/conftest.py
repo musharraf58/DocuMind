@@ -18,6 +18,7 @@ from app.core.redis import get_redis
 from app.main import app
 from app.models import Base
 from app.services.queue import get_queue
+from tests.s3_fakes import s3  # noqa: F401  (fixture: a fake S3 bucket, STORAGE_BACKEND=s3)
 
 # Tests use their own database so they can never touch your dev data.
 # Derived from DATABASE_URL: same server and credentials, different DB name.

@@ -80,7 +80,6 @@ async def delete_collection(
             select(Document.storage_key).where(Document.collection_id == collection.id)
         )
     ).all()
-    for key in storage_keys:
-        await storage.delete(key)
+    await storage.delete_many(storage_keys)
     await db.delete(collection)  # ON DELETE CASCADE removes the document rows
     await db.commit()

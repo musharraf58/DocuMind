@@ -6,15 +6,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import ask, auth, collections, conversations, documents, health, search, usage
+from app.api.errors import storage_unavailable
 from app.core.config import Settings, get_settings
 from app.core.database import SessionLocal
 from app.core.errors import CatchAllMiddleware, install_error_handlers
 from app.core.headers import SecurityHeadersMiddleware
 from app.core.limits import MaxBodySizeMiddleware
 from app.core.logging import configure_logging
+from app.core.redis import get_redis
 from app.core.request_id import HEADER as REQUEST_ID_HEADER
 from app.core.request_id import RequestIdMiddleware
+from app.services import background
 from app.services.integrity import report_missing_embeddings
+from app.services.storage import StorageError
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +39,10 @@ EXPOSED_HEADERS = [
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await report_missing_embeddings(SessionLocal)
-    yield
+    # Inline mode: the document worker and periodic maintenance run in this
+    # process, from now until shutdown (app/services/background.py).
+    async with background.running(get_settings(), get_redis()):
+        yield
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -43,6 +50,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Production refuses a weak key outright (Settings.check_production).
     if problem := settings.secret_key_problem():
         logger.warning("%s: fine for development, refused when APP_ENV=production", problem)
+    fake = "fake" in (settings.EMBEDDING_PROVIDER, settings.LLM_PROVIDER)
+    if settings.APP_ENV == "production" and fake:  # only possible with the explicit opt-in
+        logger.warning(
+            "PRODUCTION WITH FAKE PROVIDERS (ALLOW_FAKE_PROVIDERS_IN_PRODUCTION): answers and "
+            "search results are meaningless. For local testing only."
+        )
     docs = settings.DOCS_ENABLED
     app = FastAPI(
         title="DocuMind",
@@ -52,6 +65,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/openapi.json" if docs else None,
     )
     install_error_handlers(app)
+    app.add_exception_handler(StorageError, storage_unavailable)
 
     # Middleware: the LAST one added is the OUTERMOST, so a request passes
     # through them bottom to top, and the response top to bottom.

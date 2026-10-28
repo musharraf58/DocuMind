@@ -1,11 +1,15 @@
 # DocuMind
 
+<!-- CI badge: replace OWNER/REPO (here: musharraf58/DocuMind) once CI has run on main. -->
+[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+
 RAG knowledge base API. FastAPI (async), PostgreSQL + pgvector, SQLAlchemy 2.0 async, Redis.
 
-**Status:** Phase 9 (users, JWT auth, per-user collections, document upload and storage,
+**Status:** Phase 10a (users, JWT auth, per-user collections, document upload and storage,
 text extraction and chunking, embeddings and vector search, background processing,
 question answering with citations, streamed answers and conversations, hybrid search and
-retrieval evaluation, rate limits, quotas, usage tracking and hardening).
+retrieval evaluation, rate limits, quotas, usage tracking and hardening, CI, and a
+free-tier "lite mode": see [Running in lite mode](#running-in-lite-mode)).
 
 ## Architecture
 
@@ -839,18 +843,140 @@ They keep disk use and the single worker's queue bounded.
 - **`LOG_FORMAT=json`**: one JSON object per log line, for log collectors.
 - **Health checks**:
   - `/health/live` checks only the process; a platform restarts the app when it fails;
-  - `/health/ready` checks Postgres, Redis and the worker heartbeat (written every 30 s,
-    expiring after 90 s); traffic is held back while it fails;
+  - `/health/ready` checks Postgres, Redis and the worker: in Celery mode its heartbeat
+    (written every 30 s, expiring after 90 s), in inline mode the in-process worker task;
+    traffic is held back while it fails;
   - `/health` is unchanged.
 - **`APP_ENV=production`** refuses to start, listing every problem at once, when:
   - `SECRET_KEY` is weak or a well-known example;
   - the docs are enabled without `ALLOW_DOCS_IN_PRODUCTION=true`;
   - rate limits are off, or a fake provider is configured;
-  - the invite code is shorter than 12 characters.
+  - the invite code is shorter than 12 characters;
+  - `STORAGE_BACKEND=s3` without its bucket and keys.
 
   Startup errors never print setting values.
 - **Database**: connection pool and statement timeout settings, the index review and the
   dependency audit are in [docs/HARDENING.md](docs/HARDENING.md).
+
+## Running in lite mode
+
+Lite mode runs the whole service on free tiers, on one small web instance,
+for a demo or a small group of invited users. Everything stays free to run.
+
+| Part | Service (free tier, checked October 2026) | Setting |
+| --- | --- | --- |
+| API + document jobs | [Render](https://render.com/docs/free) web service: 512 MB, 0.1 CPU, sleeps after 15 idle minutes (about 1 minute to wake), disk wiped on restart, 750 hours a month, no free background worker | `render.yaml` |
+| Postgres + pgvector | [Neon](https://neon.com/docs/introduction/plans): 1 GB per project, scales to zero after 5 idle minutes, PgBouncer pooling in transaction mode | `DATABASE_URL`, `DATABASE_URL_DIRECT`, `DB_PGBOUNCER=true` |
+| Redis | [Upstash](https://upstash.com/pricing/redis): 250 MB, 500,000 commands a month | `REDIS_URL` |
+| Uploaded files | [Cloudflare R2](https://developers.cloudflare.com/r2/pricing/) (10 GB, free egress) or [Backblaze B2](https://www.backblaze.com/cloud-storage/pricing) (10 GB) | `STORAGE_BACKEND=s3`, `S3_*` |
+| Embeddings, answers | Voyage (3 requests/minute), Gemini (small daily quota) | `EMBEDDING_API_KEY`, `LLM_API_KEY` |
+
+What changes compared with Docker Compose, and why:
+
+- **No Celery worker: `INGESTION_MODE=inline`.** Render has no free
+  background worker, and an idle Celery worker sends Redis about 188,000
+  commands a day (measured), the whole Upstash month in under three days.
+  The API process runs the jobs itself, one at a time, from a bounded
+  in-memory queue (20 by default; a full queue answers uploads with 503
+  `ingestion_queue_full`). Both modes call the same job function
+  (`jobs.process_document`): the same atomic claim, heartbeat, retries and
+  failure handling. The queue living in memory is safe because Postgres, not
+  the queue, is the source of truth: the sweeper runs in-process every 2
+  minutes (Postgres only, no Redis) and re-queues anything left "pending"
+  or stuck "processing". On shutdown, the running job gets 15 seconds, then
+  its document goes back to "pending" without using up an attempt.
+- **Files in a bucket: `STORAGE_BACKEND=s3`.** The free instance's disk is
+  wiped on every deploy, restart and sleep; files there would vanish while
+  their database rows remain. Uploads and downloads stream in parts, never
+  whole files in memory.
+- **Neon through PgBouncer.** Neon's connection strings are pasted as they
+  are (`sslmode=require` is translated for asyncpg). `DB_PGBOUNCER=true`
+  turns off asyncpg's prepared-statement cache (transaction pooling hands a
+  client a different server connection per transaction) and sets the
+  statement timeout per transaction (PgBouncer refuses it as a connection
+  parameter). Migrations use `DATABASE_URL_DIRECT`, the non-pooled host.
+- **Redis budget.** Each request's Redis commands were counted and trimmed
+  (a question costs 7, an idle app 0); see
+  [docs/HARDENING.md](docs/HARDENING.md), "Redis command budget".
+- **Capacity.** Uploads stop at `MAX_DB_SIZE_MB` (400) while asking and
+  searching keep working; `RETENTION_DAYS` can expire old accounts with
+  everything they own.
+- **Memory.** The worst case measured under a 512 MB limit peaks at 262 MB
+  (docs/HARDENING.md, "Memory").
+
+### Setting it up
+
+1. **Neon.** Create a project (pgvector is available; the first migration
+   enables it). From *Connection details* copy two connection strings:
+   the **pooled** one (host contains `-pooler`) for `DATABASE_URL`, and the
+   **direct** one for `DATABASE_URL_DIRECT`.
+2. **Upstash.** Create a Redis database in the region nearest your Render
+   region and copy its `rediss://...` URL (TLS) for `REDIS_URL`.
+3. **A bucket**, private, no public access:
+   - *R2:* create a bucket, then an API token with *Object Read & Write* on
+     that bucket only. `S3_ENDPOINT_URL=https://<account id>.r2.cloudflarestorage.com`,
+     `S3_REGION=auto`.
+   - *B2:* create a private bucket and an application key restricted to it.
+     `S3_ENDPOINT_URL=https://s3.<region>.backblazeb2.com`,
+     `S3_REGION=<region>` (e.g. `us-west-004`).
+4. **Keys**: a Voyage API key and a Gemini API key.
+5. **Render**: *New → Blueprint*, pick this repository. Render reads
+   `render.yaml` and asks for every value marked `sync: false` (the secrets);
+   generate `SECRET_KEY` with
+   `python -c "import secrets; print(secrets.token_urlsafe(48))"` and pick an
+   `INVITE_CODE` of at least 12 characters. The container applies the
+   migrations on start, then serves on `$PORT`. Deploys of `main` wait for CI
+   to pass.
+6. **Check it**: `GET /health/live` answers `{"status":"ok"}`;
+   `GET /health/ready` reports database, Redis and `"worker": "ok"` (the
+   in-process worker; there is no heartbeat in lite mode). Register with the
+   invite code and upload a document.
+7. **Demo account (optional).** With the same environment as the
+   deployment (copy `.env.lite.example` to `.env.lite`, fill it in, and add
+   `DEMO_EMAIL` and `DEMO_PASSWORD`), from your machine:
+
+   ```bash
+   set -a; . ./.env.lite; set +a
+   uv run python -m scripts.seed_demo
+   ```
+
+   It creates (or updates) the read-only demo account and its sample
+   collection from `demo/corpus/`. Run it again any time; it only changes
+   what changed.
+
+`.env.lite.example` lists every variable lite mode needs. With
+`APP_ENV=production` the app refuses to start on a weak configuration (weak
+`SECRET_KEY`, docs on, rate limits off, fake providers, short invite code,
+missing S3 settings), listing every problem without printing any value.
+
+**Verify `TRUSTED_PROXY_COUNT` after the first deploy.** Render's proxy
+appends the client address to `X-Forwarded-For`, so the blueprint sets 1.
+Render doesn't document its proxy chain, so check: from one network, send 11
+login attempts within a minute, each with a different made-up email (the
+per-IP limit is 10 a minute; different emails keep the per-email limit out
+of it). Then, within that minute, try one login from another network (a
+phone off Wi-Fi). If the second network is refused too, every client looks
+like the same address. A count that is too low only makes limits shared,
+never bypassable; a count that is too high would let clients choose their
+own address, so never raise it without checking.
+
+### Living with the free tier
+
+- **The first request after 15 idle minutes waits about a minute** while
+  Render wakes the instance (and Neon its database). A visitor's first
+  page view is slow; the rest are not.
+- **Documents wait while the service sleeps.** A document uploaded just
+  before the instance goes idle is picked up again when the next request
+  wakes it (the sweeper runs at startup). A document whose embedding takes
+  longer than 15 minutes (roughly 75,000+ tokens, about 110 pages, at
+  Voyage's free rate) can be interrupted if nobody uses the app meanwhile;
+  it restarts from the beginning on wake, which spends its embedding tokens
+  again. Keeping the document page open (it polls the status) keeps the
+  instance awake.
+- **One instance only.** Inline mode and migrations-on-start assume a single
+  instance (see the comment in `docker/entrypoint.sh`).
+- **Uptime monitors** should call `/health/live` (no Redis command), never
+  `/health/ready`.
 
 ## Migrations
 
@@ -864,8 +990,11 @@ uv run alembic revision --autogenerate -m "message" # new migration from model c
 ## Tests
 
 Tests use a separate database, `documind_test`, created automatically on the same
-Postgres server (so Postgres must be running). They never call Voyage, Gemini or a real
-Redis (fakes throughout).
+Postgres server (so Postgres must be running). They never call Voyage, Gemini or S3
+(simulated servers, moto's in-process S3). Redis is faked, except in
+`tests/test_real_redis.py`, which runs the Lua scripts on a real Redis (database 15) and
+skips without one. CI runs everything against real Postgres + pgvector and Redis
+containers; see [docs/CI.md](docs/CI.md).
 
 ```bash
 docker compose up -d postgres

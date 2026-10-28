@@ -9,7 +9,8 @@
     documind:worker:heartbeat                     the worker is alive
 
 Per-user keys all contain "u:{user_id}", so everything kept about one user
-can be found by pattern (user_key_patterns). Emails are hashed: Redis never
+can be listed by name (user_keys, for deleting them) or found by pattern
+(user_key_patterns, for checking that none are left). Emails are hashed: Redis never
 holds an address. The outbound provider limiter's keys
 (documind:embedding-rate-limit:*, documind:llm-rate-limit:*) live in their
 own modules and hold no user data.
@@ -17,6 +18,7 @@ own modules and hold no user data.
 
 import hashlib
 import uuid
+from collections.abc import Iterable
 
 PREFIX = "documind"
 WORKER_HEARTBEAT = f"{PREFIX}:worker:heartbeat"
@@ -48,6 +50,18 @@ def quota_user(user_id: uuid.UUID, day: str, name: str) -> str:
 
 def quota_global(day: str, name: str) -> str:
     return f"{PREFIX}:quota:global:{day}:{name}"
+
+
+def user_keys(
+    user_id: uuid.UUID, limit_classes: Iterable[str], days: Iterable[str], quotas: Iterable[str]
+) -> list[str]:
+    """Every key that can hold this user's counters, by exact name: the
+    per-user rate-limit logs and the daily quota counters of `days`. Deleting
+    by name is one command; SCAN would cost commands in proportion to the
+    whole keyspace (and on Upstash every command counts)."""
+    keys = [rate_user(limit_class, user_id) for limit_class in limit_classes]
+    keys += [quota_user(user_id, day, name) for day in days for name in quotas]
+    return keys
 
 
 def user_key_patterns(user_id: uuid.UUID) -> list[str]:

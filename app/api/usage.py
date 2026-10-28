@@ -53,10 +53,12 @@ async def _period(db: AsyncSession, user_id, since: datetime) -> PeriodUsage:
 
 
 async def _quotas(quotas: Quotas, user_id) -> QuotasRead | None:
-    statuses = {}
-    for name in (QUESTIONS, UPLOADS, EMBED_TOKENS):
-        used = await quotas.used(user_id, name)
-        if used is None:  # Redis down
-            return None
-        statuses[name] = QuotaStatus(used=max(0, used), limit=quotas.limit(name))
+    names = (QUESTIONS, UPLOADS, EMBED_TOKENS)
+    used = await quotas.used_many(user_id, names)  # one MGET
+    if used is None:  # Redis down
+        return None
+    statuses = {
+        name: QuotaStatus(used=max(0, count), limit=quotas.limit(name))
+        for name, count in zip(names, used, strict=True)
+    }
     return QuotasRead(resets_at=quotas.resets_at(), **statuses)

@@ -108,11 +108,10 @@ def test_retry_max_below_base_is_refused():
 
 def test_env_example_names_only_real_settings_and_loads():
     """A typo in .env.example (or a renamed setting) would silently do nothing."""
-    from pathlib import Path
-
     from app.core.config import Settings
+    from tests.repo_files import repo_file
 
-    example = Path(__file__).parents[1] / ".env.example"
+    example = repo_file(".env.example")
     names = [
         line.split("=", 1)[0]
         for line in example.read_text().splitlines()

@@ -1,5 +1,6 @@
 # Secrets
 .env
+.env.lite.local
 
 # Uploaded files
 storage/

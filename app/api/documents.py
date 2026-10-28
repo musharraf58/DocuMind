@@ -5,6 +5,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 
+from app.api.demo import not_demo
 from app.api.deps import CurrentUser, DbSession, QueueDep, QuotasDep, StorageDep
 from app.api.limits import limit_default, limit_upload
 from app.core.config import get_settings
@@ -13,7 +14,10 @@ from app.schemas.chunk import ChunkRead
 from app.schemas.document import DocumentRead
 from app.services import collections as collection_service
 from app.services import documents as document_service
+from app.services.capacity import check_room_for_uploads
+from app.services.queue import queue_full
 from app.services.quotas import UPLOADS
+from app.services.storage import StorageError
 from app.services.upload_caps import MB, check_upload_caps, storage_full
 
 router = APIRouter(tags=["documents"])
@@ -23,7 +27,7 @@ router = APIRouter(tags=["documents"])
     "/collections/{collection_id}/documents",
     response_model=DocumentRead,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[limit_upload],
+    dependencies=[not_demo, limit_upload],
 )
 async def upload_document(
     collection_id: uuid.UUID,
@@ -40,6 +44,9 @@ async def upload_document(
     # (reading user.id after that would try to reload it from the database).
     user_id = user.id
     collection = await collection_service.get_owned_collection(db, collection_id, user_id)
+    if not queue.has_room():  # inline mode: refuse before storing anything
+        raise queue_full()
+    await check_room_for_uploads(db)  # 503 once the database is near its cap
     # Storage, document count, documents in progress. Locks this user's
     # uploads until this one commits, so parallel uploads can't slip past.
     storage_left = await check_upload_caps(db, user_id)
@@ -58,8 +65,9 @@ async def upload_document(
             storage_left,
             lambda: storage_full(limit_bytes, limit_bytes - storage_left),
         )
-    except HTTPException:
-        # Refused (type, size, duplicate...): it doesn't count as an upload.
+    except (HTTPException, StorageError):
+        # Refused (type, size, duplicate...) or the storage failed: it
+        # doesn't count as an upload.
         await quotas.give_back(user_id, UPLOADS)
         raise
     await queue.enqueue(document.id)  # if this fails, the sweeper enqueues it later
@@ -122,7 +130,7 @@ async def download_document(
 @router.delete(
     "/documents/{document_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[limit_default],
+    dependencies=[not_demo, limit_default],
 )
 async def delete_document(
     document_id: uuid.UUID, db: DbSession, user: CurrentUser, storage: StorageDep
@@ -136,7 +144,7 @@ async def delete_document(
     "/documents/{document_id}/reprocess",
     response_model=DocumentRead,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[limit_default],
+    dependencies=[not_demo, limit_default],
 )
 async def reprocess_document(
     document_id: uuid.UUID, db: DbSession, user: CurrentUser, queue: QueueDep
@@ -144,6 +152,8 @@ async def reprocess_document(
     """Queue the document to be processed again (e.g. after a failure or a
     model change). 409 if it is already queued or being processed."""
     document = await document_service.get_owned_document(db, document_id, user.id)
+    if not queue.has_room():
+        raise queue_full()
     if not await document_service.queue_for_processing(db, document):
         raise HTTPException(status_code=409, detail="Document is already queued or being processed")
     await queue.enqueue(document.id)

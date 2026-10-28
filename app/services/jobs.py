@@ -16,13 +16,15 @@ Errors are sorted into two kinds:
 import asyncio
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
+from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy import update
 from sqlalchemy.exc import InterfaceError, OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core import clock
 from app.core.config import Settings, get_settings
@@ -33,16 +35,20 @@ from app.services.embeddings import (
     EmbeddingError,
     EmbeddingProvider,
     RetryableEmbeddingError,
+    get_embedding_provider,
 )
 from app.services.extraction import ExtractionError
 from app.services.processing import ClaimLostError, ours, run_pipeline
-from app.services.storage import StorageBackend
+from app.services.queue import JobQueue
+from app.services.storage import StorageBackend, StorageError, get_storage
 from app.services.usage import UsageRecorder
 
 logger = logging.getLogger(__name__)
 
 GENERIC_ERROR = "Could not read this file"
 MAX_ERROR_LENGTH = 500
+INTERRUPTED = "Processing was interrupted by a restart; it will be retried"
+UNREACHABLE = (OperationalError, InterfaceError, RedisError, ConnectionError, StorageError)
 
 
 class Outcome(StrEnum):
@@ -77,8 +83,8 @@ def classify(exc: BaseException) -> Failure:
         return Failure(True, str(exc))
     if isinstance(exc, TimeoutError):
         return Failure(True, "Processing took too long and was stopped; it will be retried")
-    if isinstance(exc, OperationalError | InterfaceError | RedisError | ConnectionError):
-        # The database or Redis was briefly unreachable.
+    if isinstance(exc, UNREACHABLE):
+        # The database, Redis or the file storage was briefly unreachable.
         return Failure(True, "A temporary problem interrupted processing; it will be retried")
     if isinstance(exc, ExtractionError | EmbeddingError):
         # Scanned or corrupt file, unsupported type, over a limit, chunk too
@@ -128,11 +134,18 @@ async def run_job(
     embedder: EmbeddingProvider,
     settings: Settings | None = None,
     recorder: UsageRecorder | None = None,
+    sessions: async_sessionmaker[AsyncSession] | None = None,
 ) -> JobResult:
     """Process one document from the queue. Never raises for problems with
     the document itself: the outcome says what happened and, for a retry,
     when to enqueue it again. Embedding usage is recorded for the document's
-    owner through `recorder` (none: nothing recorded, e.g. the eval runner)."""
+    owner through `recorder` (none: nothing recorded, e.g. the eval runner).
+
+    If the job is cancelled (the process is shutting down) and `sessions` is
+    given, the document goes straight back to "pending" through a fresh
+    session, without using up an attempt: a restart isn't the document's
+    fault. Without that, the sweeper would recover it only once its heartbeat
+    went stale (and count the attempt)."""
     settings = settings or get_settings()
     claimed = await claim(db, document_id)
     if claimed is None:
@@ -154,6 +167,11 @@ async def run_job(
             "Document %s: run %s stopped, document deleted or reassigned", document_id, run_id
         )
         return JobResult(Outcome.lost)
+    except asyncio.CancelledError:
+        if sessions is not None:
+            # Shielded: the cancellation must not also cancel the release.
+            await asyncio.shield(_release(sessions, document_id, run_id))
+        raise
     except Exception as exc:
         await db.rollback()
         failure = classify(exc)
@@ -180,6 +198,41 @@ async def run_job(
 
     logger.info("Document %s: ready", document_id)
     return JobResult(Outcome.ready)
+
+
+async def process_document(
+    document_id: uuid.UUID,
+    sessions: async_sessionmaker[AsyncSession],
+    redis: Redis | None,
+    queue: JobQueue,
+    make_embedder: Callable[[Redis | None], EmbeddingProvider] = get_embedding_provider,
+    storage: StorageBackend | None = None,
+) -> JobResult:
+    """One delivery of a document job: THE entry point shared by both
+    ingestion modes. The Celery task (app/workers/tasks.py) and the inline
+    worker (app/services/inline_worker.py) differ only in how a document id
+    reaches this function and which `queue` a retry goes back to; the claim,
+    heartbeat, retry and failure logic is all here and in run_job."""
+    async with sessions() as db:
+        try:
+            embedder = make_embedder(redis)
+        except EmbeddingError as exc:
+            # Misconfiguration (e.g. dimensions not matching the database).
+            return await fail_without_processing(db, document_id, str(exc))
+        recorder = UsageRecorder(sessions, redis)
+        result = await run_job(
+            db,
+            document_id,
+            storage or get_storage(),
+            embedder,
+            recorder=recorder,
+            sessions=sessions,
+        )
+    if result.outcome == Outcome.retry:
+        # The document is already back to "pending"; if this enqueue fails,
+        # the sweeper picks it up.
+        await queue.enqueue(document_id, countdown=result.retry_in)
+    return result
 
 
 async def fail_without_processing(
@@ -238,3 +291,33 @@ async def _back_to_pending(
     )
     await db.commit()
     return updated is not None
+
+
+async def _release(
+    sessions: async_sessionmaker[AsyncSession], document_id: uuid.UUID, run_id: uuid.UUID
+) -> None:
+    """Hand an interrupted document back: "pending" again, the attempt not
+    counted. Only while this run still holds it."""
+    try:
+        async with sessions() as db:
+            released = await db.scalar(
+                update(Document)
+                .where(ours(document_id, run_id))
+                .values(
+                    status=DocumentStatus.pending,
+                    attempts=Document.attempts - 1,
+                    error_message=INTERRUPTED,
+                    processing_run_id=None,
+                    heartbeat_at=None,
+                    queued_at=clock.utcnow(),
+                )
+                .returning(Document.id)
+                .execution_options(synchronize_session=False)
+            )
+            await db.commit()
+    except Exception:
+        # The sweeper recovers it once the heartbeat is stale.
+        logger.warning("Document %s: could not release it after an interruption", document_id)
+        return
+    if released:
+        logger.info("Document %s: interrupted, back to pending", document_id)

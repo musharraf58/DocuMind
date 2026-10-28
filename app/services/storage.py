@@ -2,12 +2,21 @@ import asyncio
 import contextlib
 import os
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
+from functools import lru_cache
 from pathlib import Path
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 
 READ_CHUNK_SIZE = 1024 * 1024  # 1 MB
+
+
+class StorageError(Exception):
+    """The storage service failed or couldn't be reached. The message is
+    fixed and safe to show; details (never credentials) are logged."""
+
+    def __init__(self, message: str = "File storage is unavailable; please try again later"):
+        super().__init__(message)
 
 
 class StorageBackend(ABC):
@@ -36,6 +45,12 @@ class StorageBackend(ABC):
     @abstractmethod
     async def delete(self, key: str) -> None:
         """Remove the file. Silently succeeds if it is already gone."""
+
+    async def delete_many(self, keys: Sequence[str]) -> None:
+        """Remove several files (a collection's, an account's). Backends that
+        can delete in bulk do it in fewer requests."""
+        for key in keys:
+            await self.delete(key)
 
 
 class LocalStorageBackend(StorageBackend):
@@ -92,5 +107,31 @@ class LocalStorageBackend(StorageBackend):
 
 
 def get_storage() -> StorageBackend:
-    """FastAPI dependency. Reads the setting on each call so tests can redirect it."""
-    return LocalStorageBackend(get_settings().STORAGE_PATH)
+    """FastAPI dependency: the backend chosen by STORAGE_BACKEND. Reads the
+    settings on each call so tests can redirect them."""
+    settings = get_settings()
+    if settings.STORAGE_BACKEND == "s3":
+        return _s3_backend(*_s3_config(settings))
+    return LocalStorageBackend(settings.STORAGE_PATH)
+
+
+def _s3_config(settings: Settings) -> tuple[str, str, str, str, str]:
+    return (
+        settings.S3_ENDPOINT_URL,
+        settings.S3_BUCKET,
+        settings.S3_ACCESS_KEY_ID.get_secret_value(),
+        settings.S3_SECRET_ACCESS_KEY.get_secret_value(),
+        settings.S3_REGION,
+    )
+
+
+@lru_cache(maxsize=1)
+def _s3_backend(
+    endpoint_url: str, bucket: str, access_key_id: str, secret_access_key: str, region: str
+) -> StorageBackend:
+    """One client per configuration: creating a boto3 client is slow and
+    takes several MB, and the client is safe to share between threads."""
+    from app.services.s3_storage import S3StorageBackend, make_client
+
+    client = make_client(endpoint_url, access_key_id, secret_access_key, region)
+    return S3StorageBackend(client, bucket)

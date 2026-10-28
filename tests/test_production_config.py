@@ -44,9 +44,9 @@ def test_repetitive_secret_key_is_refused():
 
 def test_the_example_files_secret_is_refused():
     """The value shipped in .env.example must never pass."""
-    from pathlib import Path
+    from tests.repo_files import repo_file
 
-    example = Path(__file__).parents[1] / ".env.example"
+    example = repo_file(".env.example")
     lines = example.read_text().splitlines()
     line = next(text for text in lines if text.startswith("SECRET_KEY="))
     with pytest.raises(ValidationError, match="SECRET_KEY"):

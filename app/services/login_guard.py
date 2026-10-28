@@ -77,16 +77,21 @@ class LoginGuard:
         self.policy = policy or LoginPolicy.from_settings(get_settings())
         self.now = now
         self._fail = redis.register_script(_FAIL)
+        # Keys this guard has seen to hold no failures: a successful login
+        # then has nothing to clear and skips the DEL (one Redis command less
+        # per login; a guard lives for one request).
+        self._no_record: set[str] = set()
 
     async def wait_needed(self, email: str, ip: str) -> float:
         """Seconds until this account + IP may try again (0 = now)."""
+        key = redis_keys.login_failures(email, ip)
         try:
-            blocked_until = await self.redis.hget(
-                redis_keys.login_failures(email, ip), "blocked_until"
-            )
+            blocked_until, count = await self.redis.hmget(key, "blocked_until", "count")
         except (RedisError, OSError) as exc:
             outage_log.report("the failed-login delay is off (fail open)", exc)
             return 0.0
+        if blocked_until is None and count is None:
+            self._no_record.add(key)
         return max(0.0, float(blocked_until) - self.now()) if blocked_until else 0.0
 
     async def check(self, email: str, ip: str) -> None:
@@ -104,6 +109,7 @@ class LoginGuard:
 
     async def failed(self, email: str, ip: str) -> float:
         """Record a failure; returns the delay it imposes (0 while free)."""
+        self._no_record.discard(redis_keys.login_failures(email, ip))
         p = self.policy
         try:
             delay = await self._fail(
@@ -116,7 +122,10 @@ class LoginGuard:
         return float(delay)
 
     async def succeeded(self, email: str, ip: str) -> None:
+        key = redis_keys.login_failures(email, ip)
+        if key in self._no_record:
+            return  # nothing to clear
         try:
-            await self.redis.delete(redis_keys.login_failures(email, ip))
+            await self.redis.delete(key)
         except (RedisError, OSError) as exc:
             outage_log.report("the failed-login delay is off (fail open)", exc)

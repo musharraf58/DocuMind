@@ -3,6 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, Response, status
 
+from app.api.demo import not_demo
 from app.api.deps import CurrentUser, DbSession, StorageDep
 from app.api.limits import limit_default
 from app.schemas.collection import CollectionCreate, CollectionRead, CollectionUpdate
@@ -11,7 +12,12 @@ from app.services import collections as collection_service
 router = APIRouter(prefix="/collections", tags=["collections"], dependencies=[limit_default])
 
 
-@router.post("", response_model=CollectionRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=CollectionRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[not_demo],
+)
 async def create_collection(payload: CollectionCreate, db: DbSession, user: CurrentUser):
     return await collection_service.create_collection(db, user.id, payload)
 
@@ -31,14 +37,14 @@ async def get_collection(collection_id: uuid.UUID, db: DbSession, user: CurrentU
     return await collection_service.get_owned_collection(db, collection_id, user.id)
 
 
-@router.patch("/{collection_id}", response_model=CollectionRead)
+@router.patch("/{collection_id}", response_model=CollectionRead, dependencies=[not_demo])
 async def update_collection(
     collection_id: uuid.UUID, payload: CollectionUpdate, db: DbSession, user: CurrentUser
 ):
     return await collection_service.update_collection(db, collection_id, user.id, payload)
 
 
-@router.delete("/{collection_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{collection_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[not_demo])
 async def delete_collection(
     collection_id: uuid.UUID, db: DbSession, user: CurrentUser, storage: StorageDep
 ):

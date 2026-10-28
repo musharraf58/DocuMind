@@ -4,6 +4,9 @@ from typing import Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL
+
+from app.core.db_url import to_asyncpg_url
 
 # Share of the token budget held back from document embedding so that search
 # queries can still get through while a long document is being embedded.
@@ -44,14 +47,36 @@ class Settings(BaseSettings):
         env_file=".env", extra="ignore", env_ignore_empty=True, hide_input_in_errors=True
     )
 
+    # Any Postgres URL: "postgresql+asyncpg://..." as Compose uses, or a host's
+    # libpq-style "postgresql://...?sslmode=require" (translated for asyncpg,
+    # see app/core/db_url.py).
     DATABASE_URL: str
+    # For migrations only: a direct (non-pooled) connection. Neon's pooled
+    # URL goes through PgBouncer, which migrations shouldn't use (they rely on
+    # session state that transaction pooling doesn't keep). Empty: DATABASE_URL.
+    DATABASE_URL_DIRECT: str = ""
+    # DATABASE_URL goes through PgBouncer in transaction mode (Neon's
+    # "-pooler" host): no prepared-statement caches, timeouts set per
+    # transaction. See app/core/db_url.py.
+    DB_PGBOUNCER: bool = False
     REDIS_URL: str
     SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     ANTHROPIC_API_KEY: str = ""
-    # Where uploaded files live. In Docker this is a mounted named volume.
+    # Where uploaded files live. "local": the directory STORAGE_PATH (in
+    # Docker Compose a named volume). "s3": an S3-compatible bucket (R2, B2,
+    # MinIO, AWS); required where the disk is ephemeral, e.g. Render's free tier.
+    STORAGE_BACKEND: Literal["local", "s3"] = "local"
     STORAGE_PATH: str = "./storage"
+    # Empty endpoint: AWS itself. R2: https://<account id>.r2.cloudflarestorage.com
+    # B2: https://s3.<region>.backblazeb2.com
+    S3_ENDPOINT_URL: str = ""
+    S3_BUCKET: str = ""
+    S3_ACCESS_KEY_ID: SecretStr = SecretStr("")
+    S3_SECRET_ACCESS_KEY: SecretStr = SecretStr("")
+    # R2: "auto"; B2: the region in the endpoint, e.g. "us-west-004".
+    S3_REGION: str = "us-east-1"
     MAX_UPLOAD_MB: int = 20
 
     # Chunking. Tokens are counted with tiktoken's cl100k_base as an approximation.
@@ -162,7 +187,20 @@ class Settings(BaseSettings):
     # proxies and browsers don't close an idle-looking connection.
     STREAM_HEARTBEAT_SECONDS: float = Field(default=15, gt=0)
 
-    # Background jobs (Celery worker).
+    # Where document jobs run. "celery": a separate Celery worker process
+    # (Docker Compose). "inline": inside the API process, one at a time, from
+    # a bounded in-memory queue; for hosts without a free background worker
+    # (Render's free tier). See app/services/inline_worker.py.
+    INGESTION_MODE: Literal["celery", "inline"] = "celery"
+    # Inline mode: documents waiting at most; uploads beyond it get 503.
+    INLINE_QUEUE_CAPACITY: int = Field(default=20, ge=1, le=1000)
+    # Inline mode: on shutdown, let the running job finish for this long, then
+    # stop it and put its document back to "pending".
+    INLINE_SHUTDOWN_GRACE_SECONDS: float = Field(default=15, ge=0)
+    # Inline mode: the sweeper (and retention) run this often, in-process.
+    MAINTENANCE_INTERVAL_SECONDS: float = Field(default=120, ge=10)
+
+    # Background jobs (both modes).
     # Tries per document for transient failures (rate limits, timeouts, 5xx).
     MAX_JOB_ATTEMPTS: int = Field(default=4, ge=1)
     # Wait before retrying a transient failure: BASE, then 2x, then 4x ...
@@ -175,10 +213,20 @@ class Settings(BaseSettings):
     # ...and treat "processing" documents with no heartbeat for this long as stuck.
     STALE_PROCESSING_MINUTES: float = Field(default=10, gt=0)
 
+    # Capacity guard: refuse new uploads once the database is this big (MB;
+    # 0 = no limit). Ask, search and reading keep working. Neon's free tier
+    # caps storage; see app/services/capacity.py.
+    MAX_DB_SIZE_MB: int = Field(default=400, ge=0)
+    # Delete ordinary (non-demo) accounts older than this many days, with
+    # everything they own (0 = never). Runs with the periodic maintenance.
+    RETENTION_DAYS: int = Field(default=0, ge=0)
+
     # Database connections (API process). See app/core/database.py.
     DB_POOL_SIZE: int = Field(default=5, ge=1)
     DB_MAX_OVERFLOW: int = Field(default=10, ge=0)
     DB_POOL_TIMEOUT_SECONDS: float = Field(default=10, gt=0)
+    # Replace pooled connections older than this (seconds).
+    DB_POOL_RECYCLE_SECONDS: int = Field(default=1800, ge=30)
     # Postgres cancels any single statement running longer than this. The
     # slowest measured API query (vector search, 10,000 chunks) takes ~0.1 s.
     DB_STATEMENT_TIMEOUT_MS: int = Field(default=15_000, ge=100)
@@ -237,10 +285,18 @@ class Settings(BaseSettings):
     # Gemini's free tier allowed about 500 a day when measured; this leaves room.
     GLOBAL_DAILY_LLM_BUDGET: int = Field(default=350, ge=0)
     QUOTA_RESET_HOUR_UTC: int = Field(default=0, ge=0, le=23)
+    # The shared read-only demo account, for `python -m scripts.seed_demo`
+    # only (the app itself never reads these). Never commit real values.
+    DEMO_EMAIL: str = ""
+    DEMO_PASSWORD: SecretStr = SecretStr("")
     # Interactive API docs (/docs, /redoc, /openapi.json).
     DOCS_ENABLED: bool = True
     # In production, docs stay refused unless this explicit opt-in is set too.
     ALLOW_DOCS_IN_PRODUCTION: bool = False
+    # Production refuses the fake embedding/LLM providers unless this is set.
+    # Only for running the production configuration locally without paid keys
+    # (docker-compose.lite.yml); never set it on a real deployment.
+    ALLOW_FAKE_PROVIDERS_IN_PRODUCTION: bool = False
 
     @property
     def embedding_token_budget(self) -> int:
@@ -279,6 +335,22 @@ class Settings(BaseSettings):
     def embedding_document_token_budget(self) -> int:
         """Largest batch of document text: the budget minus the queries' share."""
         return self.embedding_token_budget - self.embedding_query_reserve_tokens
+
+    @property
+    def database_url(self) -> URL:
+        """DATABASE_URL in the form asyncpg accepts."""
+        return to_asyncpg_url(self.DATABASE_URL)
+
+    @property
+    def migration_database_url(self) -> URL:
+        return to_asyncpg_url(self.DATABASE_URL_DIRECT or self.DATABASE_URL)
+
+    @field_validator("DATABASE_URL", "DATABASE_URL_DIRECT")
+    @classmethod
+    def check_database_url(cls, value: str) -> str:
+        if value:
+            to_asyncpg_url(value)  # fail at startup, with a message that hides the URL
+        return value
 
     @property
     def cors_origins(self) -> list[str]:
@@ -337,13 +409,30 @@ class Settings(BaseSettings):
             )
         if not self.RATE_LIMIT_ENABLED:
             problems.append("RATE_LIMIT_ENABLED must be true")
-        if self.EMBEDDING_PROVIDER == "fake" or self.LLM_PROVIDER == "fake":
+        fake = self.EMBEDDING_PROVIDER == "fake" or self.LLM_PROVIDER == "fake"
+        if fake and not self.ALLOW_FAKE_PROVIDERS_IN_PRODUCTION:
             problems.append("the fake embedding/LLM providers are for development only")
         code = self.INVITE_CODE.get_secret_value()
         if self.REGISTRATION_MODE == "invite" and 0 < len(code) < MIN_INVITE_CODE_LENGTH:
             problems.append(f"INVITE_CODE must be at least {MIN_INVITE_CODE_LENGTH} characters")
         if problems:
             raise ValueError("Refusing to start with APP_ENV=production: " + "; ".join(problems))
+        return self
+
+    @model_validator(mode="after")
+    def check_storage(self) -> Self:
+        if self.STORAGE_BACKEND == "s3":
+            missing = [
+                name
+                for name, value in (
+                    ("S3_BUCKET", self.S3_BUCKET),
+                    ("S3_ACCESS_KEY_ID", self.S3_ACCESS_KEY_ID.get_secret_value()),
+                    ("S3_SECRET_ACCESS_KEY", self.S3_SECRET_ACCESS_KEY.get_secret_value()),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError("STORAGE_BACKEND=s3 needs " + ", ".join(missing))
         return self
 
     @model_validator(mode="after")

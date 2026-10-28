@@ -1,0 +1,99 @@
+# Render Blueprint: DocuMind in "lite mode" on Render's FREE web service.
+# (Dashboard -> New -> Blueprint -> this repository.) See "Running in lite
+# mode" in the README for the whole setup: Neon (Postgres), Upstash (Redis),
+# an S3-compatible bucket (Cloudflare R2 or Backblaze B2).
+#
+# No secret is stored here. Every secret is declared with `sync: false`:
+# Render asks for its value once, when the Blueprint is first created, and
+# keeps it in the service's environment, never in this file or the repo.
+services:
+  - type: web
+    name: documind
+    runtime: docker
+    plan: free # 512 MB RAM, 0.1 CPU; sleeps after 15 idle minutes; no persistent disk
+    region: frankfurt # pick the region nearest your Neon and Upstash databases
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # The image's entrypoint applies migrations, then starts uvicorn on $PORT.
+    # Liveness only: it doesn't touch Postgres or Redis (0 Redis commands).
+    healthCheckPath: /health/live
+    # Deploy a commit to main only after its CI checks pass.
+    autoDeployTrigger: checksPass
+    envVars:
+      # --- Mode -------------------------------------------------------------
+      - key: APP_ENV
+        value: production # strict startup checks: weak config refuses to start
+      - key: INGESTION_MODE
+        value: inline # no free background worker on Render: jobs run in-process
+      - key: STORAGE_BACKEND
+        value: s3 # the free instance's disk is wiped on every restart
+      - key: REGISTRATION_MODE
+        value: invite
+      - key: DOCS_ENABLED
+        value: "false"
+      - key: LOG_FORMAT
+        value: json
+      # Render's proxy appends the client address to X-Forwarded-For. Verify
+      # after the first deploy (README, "Running in lite mode").
+      - key: TRUSTED_PROXY_COUNT
+        value: "1"
+
+      # --- Neon Postgres ----------------------------------------------------
+      - key: DATABASE_URL # the POOLED connection string (host contains "-pooler")
+        sync: false
+      - key: DATABASE_URL_DIRECT # the direct connection string, for migrations
+        sync: false
+      - key: DB_PGBOUNCER
+        value: "true"
+      # Small pool: one instance, and Neon scales to zero when idle.
+      - key: DB_POOL_SIZE
+        value: "3"
+      - key: DB_MAX_OVERFLOW
+        value: "2"
+      - key: DB_POOL_RECYCLE_SECONDS
+        value: "240"
+      - key: MAX_DB_SIZE_MB
+        value: "400"
+
+      # --- Upstash Redis ----------------------------------------------------
+      - key: REDIS_URL # rediss://default:<password>@<host>:6379
+        sync: false
+
+      # --- S3-compatible bucket ---------------------------------------------
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_REGION
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+
+      # --- App secrets ------------------------------------------------------
+      # python -c "import secrets; print(secrets.token_urlsafe(48))"
+      - key: SECRET_KEY
+        sync: false
+      - key: INVITE_CODE
+        sync: false
+      - key: CORS_ORIGINS # your frontend's origin, if any; leave empty otherwise
+        sync: false
+
+      # --- Providers --------------------------------------------------------
+      - key: EMBEDDING_PROVIDER
+        value: voyage
+      - key: EMBEDDING_API_KEY
+        sync: false
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: LLM_API_KEY
+        sync: false
+
+      # --- Inline mode and limits sized for 512 MB ---------------------------
+      - key: INLINE_QUEUE_CAPACITY
+        value: "20"
+      - key: MAINTENANCE_INTERVAL_SECONDS
+        value: "120"
+      - key: RETENTION_DAYS
+        value: "0" # e.g. 30 for a public demo; 0 keeps accounts forever

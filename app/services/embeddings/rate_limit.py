@@ -39,13 +39,18 @@ class Reservation:
 
     waited: float
     _correct: Callable[[int], Awaitable[None]]
+    tokens: int = 0  # what was recorded for this request (our estimate)
 
     async def correct(self, actual_tokens: int) -> None:
         """The provider reported how many tokens this request really used. If
         that is more than we estimated, record the real number, so the window
         reflects what the provider is counting and the next request waits
         accordingly. Never lowered: a missing (0) or smaller count changes
-        nothing, so the limiter can only become more cautious."""
+        nothing, so the limiter can only become more cautious. (Which is also
+        why such a count isn't even sent: with a shared Redis limiter, that's
+        one command saved per request.)"""
+        if actual_tokens <= self.tokens:
+            return
         await self._correct(actual_tokens)
 
 
@@ -131,7 +136,7 @@ class RateLimiter(ABC):
                 self._clock(), tokens, token_cap, request_cap, record=True
             )
             if wait <= 0:
-                return Reservation(waited, partial(self._correct, handle))
+                return Reservation(waited, partial(self._correct, handle), tokens)
             if max_wait is not None and waited + wait > max_wait:
                 raise EmbeddingBusyError(retry_after=wait)
             await self._sleep(wait + WAKE_PADDING_SECONDS)
