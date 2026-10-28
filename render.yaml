@@ -33,10 +33,11 @@ services:
         value: "false"
       - key: LOG_FORMAT
         value: json
-      # Render's proxy appends the client address to X-Forwarded-For. Verify
-      # after the first deploy (README, "Running in lite mode").
+      # 0, measured on the live service: with 1, a client's own fake
+      # X-Forwarded-For entry was trusted and it was never rate-limited
+      # (docs/HARDENING.md, "6. The client address behind Render").
       - key: TRUSTED_PROXY_COUNT
-        value: "1"
+        value: "0"
 
       # --- Neon Postgres ----------------------------------------------------
       - key: DATABASE_URL # the POOLED connection string (host contains "-pooler")

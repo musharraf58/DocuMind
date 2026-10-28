@@ -1,8 +1,9 @@
-# Hardening: database, dependencies, Redis budget, memory
+# Hardening: database, dependencies, Redis budget, memory, client address
 
-Measured 2026-10-22 for Phase 9. The limits, quotas and HTTP hardening are
-described in the README ("Security and Limits"); this file records the
-database review and the dependency audit.
+Sections 1–3 were measured 2026-10-22 for Phase 9, sections 4–5 for Phase
+10a, and section 6 on the live Render service for Phase 10b. The limits,
+quotas and HTTP hardening are described in the README ("Security and
+Limits"); this file records the measurements behind them.
 
 ## 1. Indexes behind the hot queries
 
@@ -252,3 +253,61 @@ If a future change pushes memory up, the cheap levers, in order: lower
 `MAX_EXTRACT_PAGES` / `MAX_EXTRACTED_CHARS`; spool the stored file to a
 temporary file instead of reading it whole (the job holds the upload, at
 most 20 MB, while extracting); lower `EMBEDDING_BATCH_SIZE`.
+
+## 6. The client address behind Render
+
+Per-IP rate limits need the client's address. Behind a proxy, the app finds
+it in `X-Forwarded-For`, a header that every proxy appends to and that the
+client can also fill with anything it likes. `TRUSTED_PROXY_COUNT=N` tells
+the app to believe only the N rightmost entries, the ones our proxies wrote
+(`app/core/client_ip.py`). Only two limits key on the address: login
+(`RATE_LIMIT_LOGIN_PER_IP`, 10 a minute) and registration
+(`RATE_LIMIT_REGISTER_PER_IP`, 5 an hour). Everything else is per user.
+
+### What was tested on the live service
+
+The blueprint first set `TRUSTED_PROXY_COUNT=1`, on the assumption that
+Render's proxy appends one entry. Render doesn't document its proxy chain,
+so it was tested on the deployed app:
+
+- **With 1:** a client sending made-up `X-Forwarded-For` headers was
+  **never rate-limited**. The entry the app trusted was one the client
+  controlled, so every attempt looked like a new address. 1 was too high
+  for Render's chain: anyone could choose their own address and walk past
+  the per-IP limits.
+- **With 0:** the header is ignored and the address of the connection is
+  used. The per-IP login limit works: about 10 attempts answer 401, then
+  429.
+
+So `render.yaml` and `.env.lite.example` now set 0, and a test
+(`tests/test_lite_config.py`) keeps them there.
+
+### The trade-off
+
+With 0, the connection's address is Render's proxy, not the visitor, so
+**all visitors share the per-IP limits**: 10 login attempts a minute and 5
+registrations an hour, for everyone together. One person hammering the
+login form can make other people's logins wait up to a minute.
+
+What still applies to each person individually:
+
+- the per-email login limit (`RATE_LIMIT_LOGIN_PER_EMAIL`, 5 a minute) and
+  the progressive delay after failed logins (`app/services/login_guard.py`;
+  keyed by account and address, so with a shared address it acts per
+  account);
+- every per-user limit (asking, uploading, account changes, everything
+  else);
+- the daily quotas (questions, uploads, embedding and LLM tokens).
+
+And the important part: **nobody can bypass a limit by faking a header.**
+A count that is too low only makes limits coarser; a count that is too high
+makes them optional. For a small invite-only demo, a shared login limit is
+an acceptable price.
+
+### Re-checking after a platform change
+
+From one machine, send 11 login attempts within a minute, each with a
+different made-up email (so the per-email limit stays out of it) and each
+with a different made-up `X-Forwarded-For` header. The 11th must answer
+429. If it doesn't, the count is too high. Only consider raising it if
+Render documents a fixed proxy chain, and repeat this test after any change.

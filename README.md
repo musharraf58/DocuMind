@@ -687,8 +687,9 @@ client can set to anything**, so it is only trusted behind proxies we run:
   left was written by the client.
 
 The compose file starts uvicorn with `--no-proxy-headers`, so uvicorn doesn't rewrite the
-client address itself and only this setting decides. Set it in Phase 10 to the number of
-proxies in front of the app (often 1).
+client address itself and only this setting decides. On Render it is **0**: tested on the
+live service, 1 let a client pick its own address with a fake header (see
+[docs/HARDENING.md](docs/HARDENING.md), "6. The client address behind Render").
 
 ### When Redis is down: fail open
 
@@ -949,16 +950,15 @@ What changes compared with Docker Compose, and why:
 `SECRET_KEY`, docs on, rate limits off, fake providers, short invite code,
 missing S3 settings), listing every problem without printing any value.
 
-**Verify `TRUSTED_PROXY_COUNT` after the first deploy.** Render's proxy
-appends the client address to `X-Forwarded-For`, so the blueprint sets 1.
-Render doesn't document its proxy chain, so check: from one network, send 11
-login attempts within a minute, each with a different made-up email (the
-per-IP limit is 10 a minute; different emails keep the per-email limit out
-of it). Then, within that minute, try one login from another network (a
-phone off Wi-Fi). If the second network is refused too, every client looks
-like the same address. A count that is too low only makes limits shared,
-never bypassable; a count that is too high would let clients choose their
-own address, so never raise it without checking.
+**`TRUSTED_PROXY_COUNT` is 0 on Render, and that was measured, not
+assumed.** With 1, a client that sent made-up `X-Forwarded-For` headers was
+never rate-limited: it chose its own address. With 0, the per-IP login limit
+works (401 for about 10 attempts, then 429). The cost: all visitors share
+the per-IP limits on login and registration, while per-email and per-user
+limits and the daily quotas still apply to each person. Details and how to
+re-check: [docs/HARDENING.md](docs/HARDENING.md), "6. The client address
+behind Render". A count that is too low only makes limits shared, never
+bypassable; never raise it without repeating that test.
 
 ### Living with the free tier
 
