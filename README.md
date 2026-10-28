@@ -1,6 +1,6 @@
 # DocuMind
 
-[![CI](https://github.com/musharraf/DocuMind/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/musharraf/DocuMind/actions/workflows/ci.yml)
+[![CI](https://github.com/musharraf58/DocuMind/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/musharraf58/DocuMind/actions/workflows/ci.yml)
 
 DocuMind is a question-answering API over your own documents: upload PDFs,
 Word files, Markdown or text, and ask questions in plain language. Answers
