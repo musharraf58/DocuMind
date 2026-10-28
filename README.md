@@ -26,7 +26,8 @@ small, so these are signs, not guarantees. Under a 512 MB limit the API
 peaked at 262 MB with a 480-page document, 5 questions and 5 downloads at
 once, and a question costs 7 Redis commands, so the free Redis tier carries
 the app ([HARDENING.md](docs/HARDENING.md), sections 4 and 5). The suite has
-1,037 tests, run in CI against real Postgres and Redis ([CI.md](docs/CI.md)).
+1,177 Python tests, run in CI against real Postgres and Redis, plus 14
+JavaScript tests for the demo page ([CI.md](docs/CI.md)).
 
 ## Architecture
 
