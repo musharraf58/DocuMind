@@ -9,10 +9,9 @@ every citation is checked against the sources the model was actually given.
 It runs in full mode with Docker Compose, or entirely on free tiers in a
 512 MB "lite mode" with no background worker.
 
-**Live demo:** TODO(me) (live URL)/demo · **Demo login:** TODO(me) (demo
-credentials). The demo account is shared and read-only.
-
-TODO(me): a screenshot or GIF of the demo page.
+**Live demo:**https://documind-rdn9.onrender.com **Demo login:** demo@example.com
+Password:
+ZHtcCyHf1iVzzooIbbp4mg
 
 ## Results
 
