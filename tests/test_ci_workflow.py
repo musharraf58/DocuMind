@@ -35,7 +35,7 @@ def test_tests_run_against_real_postgres_and_redis(workflow):
 
 def test_the_demo_page_javascript_is_tested(workflow):
     commands = [step.get("run", "") for step in workflow["jobs"]["lint"]["steps"]]
-    assert "node --test tests/js/" in commands
+    assert "node --test tests/js/*.test.mjs" in commands
 
 
 def test_the_todo_list_is_not_a_ci_check():

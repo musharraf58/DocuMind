@@ -1,4 +1,4 @@
-// Unit tests for the demo page's SSE parser: node --test tests/js/
+// Unit tests for the demo page's SSE parser: node --test tests/js/*.test.mjs
 import assert from "node:assert/strict";
 import test from "node:test";
 

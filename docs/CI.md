@@ -6,7 +6,7 @@ otherwise run everything twice.) Four jobs run in parallel:
 
 | Job | What it checks |
 | --- | --- |
-| **Lint (ruff)** | `ruff check`, `ruff format --check`, actionlint (with shellcheck) on the workflow files, and the demo page's JavaScript tests (`node --test tests/js/`, no npm packages) |
+| **Lint (ruff)** | `ruff check`, `ruff format --check`, actionlint (with shellcheck) on the workflow files, and the demo page's JavaScript tests (`node --test tests/js/*.test.mjs`, no npm packages) |
 | **Tests** | `alembic upgrade head` + `alembic check` (the migrations apply and match the models), then the full pytest suite, against real `pgvector/pgvector:pg16` and `redis:7` service containers |
 | **Dependency audit** | `pip-audit` on the exact locked versions (`uv.lock`), dev tools included |
 | **Production image** | `docker build --target prod`, as Render builds it, and that it runs as a non-root user |
@@ -19,7 +19,7 @@ The tests use fake embedding and LLM providers (no network, no keys), and
 fail instead of skip if the service container were missing.
 
 **Test count:** 1,177 Python tests (`uv run pytest --collect-only -q`) and
-14 JavaScript tests (`node --test tests/js/`), counted on 2026-10-28. The
+14 JavaScript tests (`node --test tests/js/*.test.mjs`), counted on 2026-10-28. The
 README quotes these numbers; recount and update both when they change
 noticeably.
 
@@ -130,6 +130,6 @@ uv run pytest -q
 uv export --format requirements-txt --no-hashes --no-emit-project --all-groups > /tmp/req.txt
 uvx pip-audit==2.10.1 -r /tmp/req.txt --disable-pip --no-deps
 docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7
-node --test tests/js/                 # the demo page's SSE parser (Node 20+)
+node --test tests/js/*.test.mjs      # the demo page's SSE parser (Node 20+)
 docker build --target prod -t documind:prod .
 ```

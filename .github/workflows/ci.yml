@@ -42,7 +42,7 @@ jobs:
         with:
           node-version: "22"
       - name: Demo page JavaScript (node --test)
-        run: node --test tests/js/
+        run: node --test tests/js/*.test.mjs
 
   test:
     name: Tests (Postgres + pgvector, Redis)
