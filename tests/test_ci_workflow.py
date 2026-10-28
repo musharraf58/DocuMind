@@ -45,7 +45,7 @@ def test_no_secrets_are_referenced():
 
 def dev_stage_copies() -> set[str]:
     """Sources of the COPY lines in the Dockerfile's dev stage."""
-    dockerfile = (ROOT / "Dockerfile").read_text()
+    dockerfile = repo_file("Dockerfile").read_text()
     stage = dockerfile.split("AS dev", 1)[1].split("\nFROM ", 1)[0]
     sources = set()
     for line in stage.splitlines():

@@ -17,6 +17,7 @@ REPO_FILES = (
     ".env.example",
     ".env.lite.example",
     ".github/workflows/ci.yml",
+    "Dockerfile",
     "docker-compose.lite.yml",
     "render.yaml",
 )

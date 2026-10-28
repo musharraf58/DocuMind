@@ -28,7 +28,7 @@ contents: read`).
 `docker compose exec api pytest -q` runs the same suite inside the
 development image. A few tests check repository files the app itself never
 reads: `.env.example`, `.env.lite.example`, `.github/workflows/ci.yml`,
-`render.yaml` and `docker-compose.lite.yml`. CI has them from the checkout.
+`render.yaml`, `docker-compose.lite.yml` and the `Dockerfile`. CI has them from the checkout.
 The dev stage of the `Dockerfile` copies them in, next to the tests (the
 production stage doesn't).
 
