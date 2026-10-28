@@ -166,6 +166,16 @@ What changes compared with Docker Compose, and why:
    how to log in, set `DEMO_UI_HINT` in the dashboard (for example
    "Demo login: demo@example.com / <the password>"); it appears under the
    login form.
+9. **Smoke-check the deployment** (read-only, waits up to 3 minutes for a
+   sleeping instance; asking saves one conversation in the demo account):
+
+   ```bash
+   DEMO_EMAIL=... DEMO_PASSWORD=... scripts/smoke_live.sh https://<your-app>.onrender.com
+   ```
+
+   It checks `/health/live`, `/health/ready`, that `/docs` is 404, the demo
+   login, a streamed answer (token events, then `done` with a citation) and
+   that the demo account's delete attempt gets `403 demo_read_only`.
 
 `.env.lite.example` lists every variable lite mode needs. With
 `APP_ENV=production` the app refuses to start on a weak configuration (weak
