@@ -18,6 +18,10 @@ The tests use fake embedding and LLM providers (no network, no keys), and
 `REQUIRE_REAL_SERVICES=1` makes the real-Redis tests (`tests/test_real_redis.py`)
 fail instead of skip if the service container were missing.
 
+**Test count:** 1,037 tests, counted on 2026-10-28 with
+`uv run pytest --collect-only -q` (the README quotes this number; recount
+and update both when it changes noticeably).
+
 **No secrets.** The workflow references no `secrets.*` at all (a test
 enforces this). The `SECRET_KEY` in its `env` is a labelled throwaway value
 for a disposable test run. The GitHub token is read-only (`permissions:
@@ -28,7 +32,8 @@ contents: read`).
 `docker compose exec api pytest -q` runs the same suite inside the
 development image. A few tests check repository files the app itself never
 reads: `.env.example`, `.env.lite.example`, `.github/workflows/ci.yml`,
-`render.yaml`, `docker-compose.lite.yml` and the `Dockerfile`. CI has them from the checkout.
+`render.yaml`, `docker-compose.lite.yml`, the `Dockerfile`, `README.md` and
+`docs/` (the link check). CI has them from the checkout.
 The dev stage of the `Dockerfile` copies them in, next to the tests (the
 production stage doesn't).
 

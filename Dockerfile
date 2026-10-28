@@ -41,11 +41,13 @@ COPY demo ./demo
 COPY tests ./tests
 COPY eval ./eval
 # Repository files some tests check (the config examples, the CI workflow,
-# the Render blueprint, the lite stack, this Dockerfile). The app never reads them, so prod
+# the Render blueprint, the lite stack, this Dockerfile, the documentation). The app never reads them, so prod
 # doesn't get them. The list is tests/repo_files.py, REPO_FILES; a test keeps
 # it and these lines in step (docs/CI.md, "Tests in the dev container").
 COPY .env.example .env.lite.example render.yaml docker-compose.lite.yml Dockerfile ./
 COPY .github/workflows/ci.yml ./.github/workflows/ci.yml
+COPY README.md ./
+COPY docs ./docs
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]
 
