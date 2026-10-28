@@ -11,7 +11,7 @@ controls it. So it only ever appears inside the sources block, the rules
 tell the model to treat that block as data, and anything in it that looks
 like one of our tags is defused so a document can't close the block early
 and pose as instructions. This reduces the risk of prompt injection; it
-can't remove it (see README).
+can't remove it (see docs/SECURITY.md).
 """
 
 import html

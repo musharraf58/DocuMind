@@ -3,7 +3,7 @@
 `docker-compose.lite.yml` runs DocuMind the way it runs on Render's free
 tier, on your machine:
 
-| Production (README, "Running in lite mode") | Locally |
+| Production ([OPERATIONS.md](OPERATIONS.md#lite-mode-free-tier)) | Locally |
 | --- | --- |
 | Render free web service, 512 MB, no worker | the `api` container: the production image, `mem_limit: 512m`, no swap, `INGESTION_MODE=inline`, no Celery worker |
 | `APP_ENV=production`, docs off, invite-only | the same |

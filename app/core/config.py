@@ -248,7 +248,7 @@ class Settings(BaseSettings):
     # client is the Nth address from the right in X-Forwarded-For.
     TRUSTED_PROXY_COUNT: int = Field(default=0, ge=0, le=10)
     # Inbound rate limits ("N/second|minute|hour|day"), per endpoint class. See
-    # the README's "Security and Limits" for why each is what it is.
+    # docs/SECURITY.md for why each is what it is.
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_LOGIN_PER_IP: str = "10/minute"
     RATE_LIMIT_LOGIN_PER_EMAIL: str = "5/minute"

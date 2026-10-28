@@ -116,7 +116,7 @@ def per_ip(limit_class: LimitClass, *, fallback: bool = False):
 async def enforce_login_email(limiter: InboundLimiter, email: str, response: Response) -> None:
     """Login attempts per email, from any IP: stops one account being guessed
     from many addresses. (The cost: a flood can make that account's own
-    logins wait too, for at most one window. See the README.)"""
+    logins wait too, for at most one window. See docs/SECURITY.md.)"""
     rate = Rate.parse(get_settings().RATE_LIMIT_LOGIN_PER_EMAIL)
     key = redis_keys.rate_email(LimitClass.login, email)
     await enforce(limiter, key, rate, response, fallback=True, what="login attempts")

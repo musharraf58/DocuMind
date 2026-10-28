@@ -2,8 +2,8 @@
 
 Sections 1–3 were measured 2026-10-22 for Phase 9, sections 4–5 for Phase
 10a, and section 6 on the live Render service for Phase 10b. The limits,
-quotas and HTTP hardening are described in the README ("Security and
-Limits"); this file records the measurements behind them.
+quotas and HTTP hardening are described in [SECURITY.md](SECURITY.md); this
+file records the measurements behind them.
 
 ## 1. Indexes behind the hot queries
 

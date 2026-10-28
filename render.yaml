@@ -1,6 +1,6 @@
 # Render Blueprint: DocuMind in "lite mode" on Render's FREE web service.
-# (Dashboard -> New -> Blueprint -> this repository.) See "Running in lite
-# mode" in the README for the whole setup: Neon (Postgres), Upstash (Redis),
+# (Dashboard -> New -> Blueprint -> this repository.) See docs/OPERATIONS.md,
+# "Lite mode", for the whole setup: Neon (Postgres), Upstash (Redis),
 # an S3-compatible bucket (Cloudflare R2 or Backblaze B2).
 #
 # No secret is stored here. Every secret is declared with `sync: false`:
