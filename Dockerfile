@@ -5,7 +5,7 @@
 #   prod     (the default for a plain `docker build .`, and what Render
 #            builds): a fresh slim image with only the venv and the app. No
 #            uv, no build tools, no tests; runs as a non-root user.
-FROM python:3.12-slim AS builder
+FROM python:3.15-slim AS builder
 
 # uv binary, copied from the official image (pinned; Dependabot bumps it)
 COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /usr/local/bin/uv
@@ -53,7 +53,7 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-pro
 
 
 # Last stage = the default target, so a plain `docker build .` makes this image.
-FROM python:3.12-slim AS prod
+FROM python:3.15-slim AS prod
 
 # MALLOC_ARENA_MAX=2: glibc gives each thread its own memory arena, and the
 # app runs extraction and file I/O in worker threads. Capping the arenas
